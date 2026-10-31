@@ -1,0 +1,20 @@
+#!/bin/sh
+# ubuntu-chroot [command...]: enter the Ubuntu root in RAM (/ubuntu) that
+# tools/ubuntu/ubuntu-on-phone.sh unpacked from the PC. apt reaches the
+# internet through the PC's proxy (tools/ubuntu/usb-proxy.py, 172.16.42.2:3128).
+R=/ubuntu
+[ -x $R/bin/bash ] || { echo "no Ubuntu in $R: run tools/ubuntu/ubuntu-on-phone.sh on the PC"; exit 1; }
+for d in proc sys dev dev/pts tmp; do mkdir -p $R/$d; done
+mountpoint -q $R/proc || mount -t proc proc $R/proc
+mountpoint -q $R/sys || mount -t sysfs sysfs $R/sys
+mountpoint -q $R/dev || mount -o bind /dev $R/dev
+mountpoint -q $R/dev/pts || mount -t devpts devpts $R/dev/pts
+mountpoint -q $R/tmp || mount -t tmpfs tmpfs $R/tmp
+echo 'Acquire::http::Proxy "http://172.16.42.2:3128/"; Acquire::https::Proxy "http://172.16.42.2:3128/";' \
+	> $R/etc/apt/apt.conf.d/01usb-proxy
+echo "nameserver 1.1.1.1" > $R/etc/resolv.conf
+echo bullhead > $R/etc/hostname
+[ $# -gt 0 ] || set -- /bin/bash -l
+exec chroot $R /usr/bin/env -i HOME=/root TERM="${TERM:-linux}" \
+	PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+	LANG=C.UTF-8 "$@"

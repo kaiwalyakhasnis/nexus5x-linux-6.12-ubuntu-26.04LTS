@@ -1,0 +1,19 @@
+conspy: KDGKBMODE returns an int
+
+conspy reads the keyboard mode into a long. KDGKBMODE writes an int, so on
+64-bit the upper half is whatever was on the stack. When it is not zero,
+the K_XLATE/K_UNICODE check fails, conspy takes the console for scan code
+mode and drops every key it was given. Seen on arm64 (the Nexus 5X) when
+conspy runs over SSH; from telnet the stack happened to be zero.
+
+--- a/miscutils/conspy.c
++++ b/miscutils/conspy.c
+@@ -533,7 +533,7 @@
+ 		G.key_count += bytes_read;
+ 		if (G.escape_count == 0) {
+ 			int handle, result;
+-			long kbd_mode;
++			int kbd_mode;
+ 
+ 			handle = xopen(tty_name, O_WRONLY);
+ 			result = ioctl(handle, KDGKBMODE, &kbd_mode);

@@ -7,19 +7,20 @@
 > who knows these drivers. Read it as notes from an experiment, not a reference,
 > and use it at your own risk (`fastboot boot` only, never flash it).
 
-> **Work in progress.** Display, touch, a USB keyboard and mouse, all 6 cores and CPU frequency scaling work; much of the phone does not yet (see the table below).
+> **Work in progress.** Display, touch, a USB keyboard and mouse, all 6 cores, CPU frequency scaling and an Ubuntu 26.04 userspace work; much of the phone does not yet (see the table below).
 
 The LG Nexus 5X (bullhead, Snapdragon 808 / MSM8992) running a kernel.org
 6.12 LTS kernel (plain upstream stable, not Android's ACK/GKI) with a static
 BusyBox userspace. It has the real MDP5/DSI display driver, multitouch, USB
 host for a keyboard, all 6 CPU cores and CPU frequency scaling up to the
-stock 1.44/1.82 GHz. It boots to a BusyBox shell on the panel.
+stock 1.44/1.82 GHz. It boots to a BusyBox shell on the panel, and Ubuntu
+26.04.1 LTS runs on top of it in RAM (`ubuntu-chroot`, see Build and boot).
 Nothing gets flashed: `fastboot boot` loads it into RAM, and a reboot goes
 back to whatever is installed.
 
-| Status screen (tty2) | BusyBox shell on the panel | `cat /proc/cpuinfo` | `top`, per-core view (`1`) | `touchtest`, two fingers |
-|:---:|:---:|:---:|:---:|:---:|
-| <img src="screenshots/status.png" width="260"> | <img src="screenshots/shell.png" width="260"> | <img src="screenshots/cpuinfo.png" width="260"> | <img src="screenshots/top.png" width="260"> | <img src="screenshots/touchtest.png" width="260"> |
+| Ubuntu 26.04.1 LTS (`fastfetch`) | Status screen (tty2) | BusyBox shell on the panel | `cat /proc/cpuinfo` | `top`, per-core view (`1`) | `touchtest`, two fingers |
+|:---:|:---:|:---:|:---:|:---:|:---:|
+| <img src="screenshots/ubuntu.png" width="260"> | <img src="screenshots/status.png" width="260"> | <img src="screenshots/shell.png" width="260"> | <img src="screenshots/cpuinfo.png" width="260"> | <img src="screenshots/top.png" width="260"> | <img src="screenshots/touchtest.png" width="260"> |
 
 The screenshots are copied straight from `/dev/fb0` on the phone (`cat /dev/fb0 | nc`).
 The trace on the status screen is a harmless backlight-driver warning (see below).
@@ -37,6 +38,7 @@ Tested on a rev_1.0 board (LGH791, bootloader BHZ32c).
 | ✅ | Touchscreen (Synaptics S3320, RMI4) | Mainline `rmi4` over I2C, 10-finger multitouch on `/dev/input/event2`. `touchtest` on the phone paints what it reports |
 | ✅ | USB network (NCM) + telnet | `telnet 172.16.42.1`. `conspy 1` lets you type into the shell on the panel |
 | ✅ | USB host: keyboard | A USB keyboard on a USB-C OTG adapter types into the shell on the panel (tty1; Alt+F2 shows the status screen). The FUSB301 switches the port to host and turns on 5 V; the PC's USB network comes back when it is plugged in again |
+| ✅ | Ubuntu 26.04.1 LTS userspace | Ubuntu Base (arm64) unpacked into RAM and entered with `ubuntu-chroot`. `apt` works through a proxy on the PC, and an SSH server gives a full Ubuntu login from the PC. Not the init system (BusyBox still boots), and gone after a reboot |
 | ✅ | USB host: mouse | A USB mouse on the same adapter works like any USB HID device. `touchtest` shows a pointer and paints with the left button |
 | ✅ | eMMC detected, pstore/ramoops, QEMU `virt` | eMMC is never mounted or written |
 | ✅ | Temperature sensors (TSENS) | 13 thermal zones in `/sys/class/thermal`, calibrated from the phone's fuses. Each shuts the phone down at 115 °C, the stock reset temperature |
@@ -135,6 +137,14 @@ a shell on CPU0. These are the extra pieces:
       register sequence.
     * dwc3 is dual-role, peripheral by default, so the PC link works without
       them too. `rcS` rebinds the USB gadget when device mode comes back.
+16. **BusyBox `conspy` on arm64** (`patches-busybox/`): it reads
+    `KDGKBMODE` into a `long`, but the kernel writes an `int`. On 64-bit the
+    upper half is stack garbage, so `conspy` sometimes decides the console is
+    in scan-code mode and silently drops every key. It worked from telnet
+    and failed over SSH. `scripts/build-busybox.sh` applies the fix.
+17. **No RTC driver yet**: the phone starts in 1970, and `apt` rejects
+    Release files from the "future". `ubuntu-on-phone.sh` sets the clock from
+    the PC.
 
 Patches 0001-0004 and 0009 come from
 [oneplus2-mainline](https://github.com/luvingiane/oneplus2-mainline)
@@ -160,6 +170,14 @@ telnet 172.16.42.1                 # PC side gets 172.16.42.2 over DHCP
 
 * **Black panel?** Hold Power for 10 s and try `boot-rev-10-keep.img`, which
   keeps LK's panel state instead of re-initialising the panel.
+* **Ubuntu on top:** with the phone booted and on the PC cable, run
+  `tools/ubuntu/ubuntu-on-phone.sh`. It unpacks Ubuntu Base 26.04.1 (from
+  `downloads/ubuntu/`) into a 1.2 GB tmpfs on the phone, starts
+  `tools/ubuntu/usb-proxy.py` (an HTTP proxy for `apt`, listening only on
+  the USB network) and sets the phone's clock. It also installs an SSH server
+  with a key kept in `out/ssh`. Then `tools/ubuntu/ssh-phone.sh` logs in to
+  Ubuntu, `tools/ubuntu/ssh-phone.sh screen` mirrors the panel, and
+  `ubuntu-chroot` on the phone (or from the USB keyboard) enters it.
 * **Getting back to fastboot:** `reboot-to bootloader` in telnet. Or run
   `scripts/phone-boot.sh [image]`: from this kernel, from Android (adb) or
   from fastboot, it gets to fastboot, boots the image and waits for the USB
@@ -177,6 +195,8 @@ telnet 172.16.42.1                 # PC side gets 172.16.42.2 over DHCP
 | `tools/gen-jd35695b-gamma.py` | Turns the 3.10 panel gamma tables into the driver's header |
 | `tools/cpr/` | `cpr_open_loop.py` (the open-loop voltages from a fuse dump, to check against) and `gen-cpr-dtsi.py` |
 | `tools/touchtest/` | `touchtest [seconds]`: paints each finger's path (and a USB mouse's, with a pointer) and logs input; c clears, q quits. Built into the initramfs as `/usr/bin/touchtest` |
+| `tools/ubuntu/` | `ubuntu-on-phone.sh` (Ubuntu Base into RAM, clock, SSH), `usb-proxy.py` (apt's proxy on the PC), `ssh-phone.sh` (log in, or `screen` to mirror the panel); `ubuntu-chroot` is in the initramfs |
+| `patches-busybox/` | BusyBox fixes, applied by `scripts/build-busybox.sh` |
 | `tools/reboot-to/` | `reboot-to bootloader\|recovery`: reboot with a reason, built into the initramfs |
 | `scripts/phone-boot.sh` | From wherever the phone is, to fastboot, then `fastboot boot` an image |
 
