@@ -7,7 +7,7 @@
 > who knows these drivers. Read it as notes from an experiment, not a reference,
 > and use it at your own risk (`fastboot boot` only, never flash it).
 
-> **Work in progress.** Display, touch, a USB keyboard, all 6 cores and CPU frequency scaling work; much of the phone does not yet (see the table below).
+> **Work in progress.** Display, touch, a USB keyboard and mouse, all 6 cores and CPU frequency scaling work; much of the phone does not yet (see the table below).
 
 The LG Nexus 5X (bullhead, Snapdragon 808 / MSM8992) running a kernel.org
 6.12 LTS kernel (plain upstream stable, not Android's ACK/GKI) with a static
@@ -37,7 +37,7 @@ Tested on a rev_1.0 board (LGH791, bootloader BHZ32c).
 | ✅ | Touchscreen (Synaptics S3320, RMI4) | Mainline `rmi4` over I2C, 10-finger multitouch on `/dev/input/event2`. `touchtest` on the phone paints what it reports |
 | ✅ | USB network (NCM) + telnet | `telnet 172.16.42.1`. `conspy 1` lets you type into the shell on the panel |
 | ✅ | USB host: keyboard | A USB keyboard on a USB-C OTG adapter types into the shell on the panel (tty1; Alt+F2 shows the status screen). The FUSB301 switches the port to host and turns on 5 V; the PC's USB network comes back when it is plugged in again |
-| ⚠️ | USB host: mouse | Detected like any USB HID device and handled by `touchtest` (pointer, paint with the left button), not yet tried |
+| ✅ | USB host: mouse | A USB mouse on the same adapter works like any USB HID device. `touchtest` shows a pointer and paints with the left button |
 | ✅ | eMMC detected, pstore/ramoops, QEMU `virt` | eMMC is never mounted or written |
 | ✅ | Temperature sensors (TSENS) | 13 thermal zones in `/sys/class/thermal`, calibrated from the phone's fuses. Each shuts the phone down at 115 °C, the stock reset temperature |
 | ✅ | CPU voltages (CPR open loop) | Per-speed voltages from the chip's own fuses, computed like 3.10's `cpr-regulator`, within the stock floor and ceiling. The MX memory rail is voted per speed, and the A53 rail stays high enough for the CCI |
