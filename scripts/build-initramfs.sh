@@ -9,6 +9,8 @@ cp -a "$TOP"/rootfs/. "$STAGE"/
 cp "$TOP/out/busybox/busybox" "$STAGE/bin/busybox"
 # reboot-to bootloader|recovery: BusyBox's reboot cannot pass a reason
 aarch64-linux-gnu-gcc -static -Os -s -o "$STAGE/sbin/reboot-to" "$TOP/tools/reboot-to/reboot-to.c"
+# touchtest [seconds]: paint what the touchscreen reports
+aarch64-linux-gnu-gcc -static -Os -s -o "$STAGE/usr/bin/touchtest" "$TOP/tools/touchtest/touchtest.c"
 ln -sf /bin/busybox "$STAGE/sbin/init"
 ln -sf busybox "$STAGE/bin/sh"
 # /dev/console must exist before devtmpfs is mounted, or init has no stdout.

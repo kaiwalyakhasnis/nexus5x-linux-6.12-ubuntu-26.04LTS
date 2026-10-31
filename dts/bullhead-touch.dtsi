@@ -1,0 +1,63 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * Touchscreen: Synaptics S3320 (RMI4) in the panel, from the 3.10
+ * lge/msm8992-bullhead-touch.dtsi: i2c_2 (BLSP1 QUP2, 0xf9924000) at 400 kHz,
+ * address 0x20, interrupt GPIO 22 (level low), reset GPIO 8 (active low),
+ * vdd L22 3.1 V, vcc_i2c L25 1.8 V (the panel driver's tpvci/tpio too).
+ *
+ * The BLSP BAM DMA engines do not probe here, and 3.10 runs this bus with
+ * qcom,disable-dma: PIO. Mainline rmi4 has no reset GPIO, so the pin state
+ * releases it (output high), as the 3.10 driver leaves it after power-on.
+ */
+&blsp1_i2c2 {
+	status = "okay";
+	/delete-property/ dmas;
+	/delete-property/ dma-names;
+
+	touchscreen@20 {
+		compatible = "syna,rmi4-i2c";
+		reg = <0x20>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		interrupts-extended = <&tlmm 22 IRQ_TYPE_LEVEL_LOW>;
+
+		vdd-supply = <&pm8994_l22>;
+		vio-supply = <&pm8994_l25>;
+
+		pinctrl-names = "default";
+		pinctrl-0 = <&ts_reset_default>, <&ts_int_default>;
+
+		/* synaptics,pon-delay = <66> */
+		syna,startup-delay-ms = <70>;
+
+		rmi4-f01@1 {
+			reg = <0x01>;
+			/* 2: no sleep */
+			syna,nosleep-mode = <2>;
+		};
+
+		rmi4-f12@12 {
+			reg = <0x12>;
+			/* touchscreen */
+			syna,sensor-type = <1>;
+		};
+	};
+};
+
+&tlmm {
+	ts_reset_default: ts-reset-default-state {
+		pins = "gpio8";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+		output-high;
+	};
+
+	ts_int_default: ts-int-default-state {
+		pins = "gpio22";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+};

@@ -7,18 +7,18 @@
 > who knows these drivers. Read it as notes from an experiment, not a reference,
 > and use it at your own risk (`fastboot boot` only, never flash it).
 
-> **Work in progress.** Display, all 6 cores and CPU frequency scaling work; much of the phone does not yet (see the table below).
+> **Work in progress.** Display, touch, all 6 cores and CPU frequency scaling work; much of the phone does not yet (see the table below).
 
 The LG Nexus 5X (bullhead, Snapdragon 808 / MSM8992) running a kernel.org
 6.12 LTS kernel (plain upstream stable, not Android's ACK/GKI) with a static
-BusyBox userspace. It has the real MDP5/DSI display driver, all 6 CPU cores and
-CPU frequency scaling up to the stock 1.44/1.82 GHz.
+BusyBox userspace. It has the real MDP5/DSI display driver, multitouch, all 6
+CPU cores and CPU frequency scaling up to the stock 1.44/1.82 GHz.
 Nothing gets flashed: `fastboot boot` loads it into RAM, and a reboot goes
 back to whatever is installed.
 
-| Status screen (tty1) | BusyBox shell on the panel | `cat /proc/cpuinfo` | `top`, per-core view (`1`) |
-|:---:|:---:|:---:|:---:|
-| <img src="screenshots/status.png" width="260"> | <img src="screenshots/shell.png" width="260"> | <img src="screenshots/cpuinfo.png" width="260"> | <img src="screenshots/top.png" width="260"> |
+| Status screen (tty1) | BusyBox shell on the panel | `cat /proc/cpuinfo` | `top`, per-core view (`1`) | `touchtest`, two fingers |
+|:---:|:---:|:---:|:---:|:---:|
+| <img src="screenshots/status.png" width="260"> | <img src="screenshots/shell.png" width="260"> | <img src="screenshots/cpuinfo.png" width="260"> | <img src="screenshots/top.png" width="260"> | <img src="screenshots/touchtest.png" width="260"> |
 
 The screenshots are copied straight from `/dev/fb0` on the phone (`cat /dev/fb0 | nc`).
 The trace on the status screen is a harmless backlight-driver warning (see below).
@@ -33,6 +33,7 @@ Tested on a rev_1.0 board (LGH791, bootloader BHZ32c).
 | ✅ | 2 × Cortex-A57 (CPU4-5) | 384-1824 MHz (stock speed bin 0 table), schedutil. They join late with `arm64.late_cpu_conflicts=warn`, so they run without their Spectre-v2 mitigation and A57 errata workarounds (832075 can rarely hang the CPU) |
 | ✅ | Display: MDP5 1.10 + DSI + JD35695B panel driver | Framebuffer console with a 16×32 font (67×60 characters) |
 | ✅ | Backlight (PMI8994 WLED) | Stock limits: 15 mA per string, 29.5 V OVP |
+| ✅ | Touchscreen (Synaptics S3320, RMI4) | Mainline `rmi4` over I2C, 10-finger multitouch on `/dev/input/event2`. `touchtest` on the phone paints what it reports |
 | ✅ | USB network (NCM) + telnet | `telnet 172.16.42.1`. `conspy 2` lets you type into the shell on the panel |
 | ✅ | eMMC detected, pstore/ramoops, QEMU `virt` | eMMC is never mounted or written |
 | ✅ | Temperature sensors (TSENS) | 13 thermal zones in `/sys/class/thermal`, calibrated from the phone's fuses. Each shuts the phone down at 115 °C, the stock reset temperature |
@@ -41,9 +42,9 @@ Tested on a rev_1.0 board (LGH791, bootloader BHZ32c).
 | ✅ | Reboot, and reboot to fastboot | `reboot-to bootloader` on the phone, or `scripts/phone-boot.sh` from the PC, gets to LK's fastboot with no buttons |
 | ⚠️ | Display on every boot | About 1 boot in 6 the RPM (SMD) does not answer. Then there are no RPM regulators: the panel stays frozen on the bootloader's Google logo and cpufreq stays off (telnet still works). A `reboot` from such a boot can hang: hold Power, then Power + Volume down |
 | ⚠️ | Boot-time `WARNING` from `wled_ovp_work` | An unbalanced `enable_irq`, because the bootloader leaves the backlight on. Cosmetic |
-| ❌ | Closed-loop CPR, thermal core control | The CPR hardware loop that trims voltage below open loop (stock runs 1440 MHz at 1115 mV, here 1160 mV). The stock 80 °C core offlining has no mainline equivalent |
+| ❌ | Closed-loop CPR, thermal core control | The CPR hardware loop that trims voltage below open loop (stock runs 1440 MHz at 1115 mV, here 1160 mV). The stock core offlining (LG: from 90 °C) has no mainline equivalent |
 | ❌ | GPU (Adreno 418), IOMMU | Scanout uses a contiguous carveout instead |
-| ❌ | Touch, Wi-Fi/BT, modem, audio, camera, sensors, battery/charging | Not attempted |
+| ❌ | Wi-Fi/BT, modem, audio, camera, sensors, battery/charging | Not attempted |
 
 ## The hacks it takes
 
@@ -112,6 +113,15 @@ a shell on CPU0. These are the extra pieces:
     checked against the stock driver's own log on the same phone.
     `dts/bullhead-cpr.dtsi` is generated from the 3.10 DT by
     `tools/cpr/gen-cpr-dtsi.py`.
+13. **Touchscreen** (DT only): mainline's `rmi4` driver handles the S3320 on
+    BLSP1 I2C2 at 0x20 (interrupt GPIO 22, supplies L22/L25, as in 3.10). The
+    BAM DMA engines don't probe here, so the bus runs in PIO mode, as 3.10's
+    `qcom,disable-dma` does. Mainline `rmi4` has no reset GPIO, so the pin
+    state releases reset (GPIO 8 high).
+14. **Drawing on a command-mode panel**: the panel only shows frames the
+    display driver sends. Writes into an mmap'd `/dev/fb0` don't tell the
+    msm driver anything changed, so `touchtest` writes the changed rows back
+    through `write()`, which does.
 
 Patches 0001-0004 and 0009 come from
 [oneplus2-mainline](https://github.com/luvingiane/oneplus2-mainline)
@@ -147,12 +157,13 @@ telnet 172.16.42.1                 # PC side gets 172.16.42.2 over DHCP
 | Path | What it is |
 |---|---|
 | `patches/` | The 12 kernel patches above, applied by `scripts/prepare-kernel.sh` |
-| `dts/` | Board files: mainline `msm8992-lg-bullhead`, `bullhead-smp.dtsi` (ACC for CPU1-5, A57 L2 and clock mux), `bullhead-display.dtsi` (MDSS, DSI, panel, WLED), `bullhead-thermal.dtsi` (QFPROM, TSENS, thermal zones), `bullhead-cpufreq.dtsi` (rails, CPU clocks, throttling), `bullhead-cpr.dtsi` (CPR nodes, OPP tables; generated) |
+| `dts/` | Board files: mainline `msm8992-lg-bullhead`, `bullhead-smp.dtsi` (ACC for CPU1-5, A57 L2 and clock mux), `bullhead-display.dtsi` (MDSS, DSI, panel, WLED), `bullhead-thermal.dtsi` (QFPROM, TSENS, thermal zones), `bullhead-cpufreq.dtsi` (rails, CPU clocks, throttling), `bullhead-cpr.dtsi` (CPR nodes, OPP tables; generated), `bullhead-touch.dtsi` (I2C2, touchscreen) |
 | `scripts/kernel.config` | Options built into the kernel, plus the size diet |
 | `rootfs/` | `/init` (mounts, then hands off to BusyBox init), `inittab`, `rcS` (USB gadget, telnetd), status screen, boot report |
 | `scripts/mkbootimg.py` | A ~60-line Android boot image writer |
 | `tools/gen-jd35695b-gamma.py` | Turns the 3.10 panel gamma tables into the driver's header |
 | `tools/cpr/` | `cpr_open_loop.py` (the open-loop voltages from a fuse dump, to check against) and `gen-cpr-dtsi.py` |
+| `tools/touchtest/` | `touchtest [seconds]`: paints each finger's path and logs touches, built into the initramfs as `/usr/bin/touchtest` |
 | `tools/reboot-to/` | `reboot-to bootloader\|recovery`: reboot with a reason, built into the initramfs |
 | `scripts/phone-boot.sh` | From wherever the phone is, to fastboot, then `fastboot boot` an image |
 

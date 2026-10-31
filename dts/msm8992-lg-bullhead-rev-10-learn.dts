@@ -12,3 +12,4 @@
 #include "bullhead-thermal.dtsi"
 #include "bullhead-cpufreq.dtsi"
 #include "bullhead-cpr.dtsi"
+#include "bullhead-touch.dtsi"
