@@ -1,15 +1,20 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Secondary A53 cores (cpu1-3) through the firmware's ACC method; the
- * bullhead firmware has no PSCI (mainline already deletes the psci node).
- * The ACC power-control blocks are the second reg of acc1..acc3 in the 3.10
- * qcom/msm8992.dtsi (0xf909b000 + 0x10000 * n). Needs kernel patch
- * "arm64: smp: qcom,8994-arm-cortex-acc enable method".
+ * Secondary cores through the firmware's ACC method; the bullhead firmware
+ * has no PSCI (mainline already deletes the psci node). The ACC power-control
+ * blocks are the second reg of acc1..acc5 in the 3.10 qcom/msm8992.dtsi
+ * (0xf909b000 + 0x10000 * n). Needs kernel patches "arm64: smp:
+ * qcom,8994-arm-cortex-acc enable method", "set the A57 cluster clock before
+ * its L2 powers up" and arm64.late_cpu_conflicts=warn (the cores start at
+ * late init, once SCM is up).
  *
- * The A57 cores (CPU4, CPU5) keep mainline's enable-method = "psci", which
- * this firmware lacks, so they stay off: without a cluster clock driver their
- * PLL is not programmed (they would run at the 19.2 MHz reference clock) and
- * there is no thermal driver to throttle them.
+ * The A57 cores (CPU4, CPU5) need their L2 powered first: l2ccc_1
+ * (0xf900f000, scm_io register 0xf911210c, vctl 0xb8) and cluster1_spm
+ * (0xf9013000, Q2S 0xf900f210) from 3.10 msm8992.dtsi / msm8992-pm.dtsi.
+ * The bootloader leaves their clock on the 19.2 MHz reference; the cluster
+ * mux is set to 0x6 (GPLL0, 600 MHz) first, as 3.10's
+ * cpu_clock_8994_init_a57_v2() does. Without a CPU clock driver, CPR or
+ * thermal driver they stay at that rate, the stock boot-time one.
  */
 &soc {
 	acc1: power-controller@f909b000 {
@@ -25,6 +30,27 @@
 	acc3: power-controller@f90bb000 {
 		compatible = "qcom,msm8994-cpu-acc";
 		reg = <0xf90bb000 0x1000>;
+	};
+
+	acc4: power-controller@f90cb000 {
+		compatible = "qcom,msm8994-cpu-acc";
+		reg = <0xf90cb000 0x1000>;
+	};
+
+	acc5: power-controller@f90db000 {
+		compatible = "qcom,msm8994-cpu-acc";
+		reg = <0xf90db000 0x1000>;
+	};
+
+	/* A57 L2: power control (and cluster clock mux), its SPM, SPM Q2S */
+	l2ccc1: power-controller@f900f000 {
+		compatible = "qcom,msm8994-l2ccc";
+		reg = <0xf900f000 0x1000>,
+		      <0xf9013000 0x1000>,
+		      <0xf900f210 0x8>;
+		qcom,vctl-val = <0xb8>;
+		qcom,l2-scm-reg = <0xf911210c>;
+		qcom,cluster-clk-mux = <0x6>;
 	};
 };
 
@@ -43,3 +69,14 @@
 	qcom,acc = <&acc3>;
 };
 
+&CPU4 {
+	enable-method = "qcom,8994-arm-cortex-acc";
+	qcom,acc = <&acc4>;
+	qcom,l2ccc = <&l2ccc1>;
+};
+
+&CPU5 {
+	enable-method = "qcom,8994-arm-cortex-acc";
+	qcom,acc = <&acc5>;
+	qcom,l2ccc = <&l2ccc1>;
+};

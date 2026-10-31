@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: bullhead-linux <kaiwalyakhasnis57@gmail.com>
 Date: Sat, 31 Oct 2026 06:53:30 +0900
-Subject: [PATCH 2/7] clk: qcom: mmcc-msm8994: keep the MDSS GDSC on
+Subject: [PATCH 2/9] clk: qcom: mmcc-msm8994: keep the MDSS GDSC on
 
 From oneplus2-mainline (patch 0002, GPL-2.0). The DSI PLL sits in this
 power domain and mainline has no 20nm DSI PLL driver: the display relies on

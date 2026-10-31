@@ -1,0 +1,54 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bullhead-linux <kaiwalyakhasnis57@gmail.com>
+Date: Sat, 31 Oct 2026 11:16:28 +0900
+Subject: [PATCH 8/9] arm64: smp: qcom ACC: set the A57 cluster clock before
+ its L2 powers up
+
+The bootloader leaves the A57 cluster on the 19.2 MHz reference clock.
+Write "qcom,cluster-clk-mux" from the L2 node to the cluster's clock mux
+before its L2 powers up, as the 3.10 kernel's cpu_clock_8994_init_a57_v2()
+does before smp_init (0x6 selects GPLL0, 600 MHz, until a CPU clock driver
+takes over).
+---
+ arch/arm64/kernel/smp_qcom_acc.c | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/arch/arm64/kernel/smp_qcom_acc.c b/arch/arm64/kernel/smp_qcom_acc.c
+index 70b9e934f..29a38640d 100644
+--- a/arch/arm64/kernel/smp_qcom_acc.c
++++ b/arch/arm64/kernel/smp_qcom_acc.c
+@@ -18,6 +18,11 @@
+  * linked with "qcom,l2ccc" gives the L2 power control block, its SPM (SAW,
+  * voltage control) and the SPM Q2S register; the sequence follows
+  * power_on_l2_msm8994() and msm_spm_turn_on_cpu_rail() of the OnePlus kernel.
++ *
++ * Nothing sets the A57 cluster clock before these cores start: the
++ * bootloader leaves it on the 19.2 MHz reference. "qcom,cluster-clk-mux" on
++ * that node is written to the cluster's mux first, as the 3.10 kernel's
++ * cpu_clock_8994_init_a57_v2() does before smp_init (0x6: GPLL0, 600 MHz).
+  */
+ 
+ #include <linux/cpu.h>
+@@ -43,6 +48,7 @@
+ #define L2_SPM_STS		0xc
+ #define L2_VREG_CTL		0x1c
+ #define L2_PON_MASK		(BIT(9) | BIT(28))
++#define CLUSTER_CLK_MUX		0x54
+ 
+ static phys_addr_t acc_base[NR_CPUS];
+ static struct device_node *l2_node[NR_CPUS];
+@@ -79,6 +85,14 @@ static int qcom_acc_l2_on(unsigned int cpu)
+ 		goto out;
+ 	}
+ 
++	if (!of_property_read_u32(np, "qcom,cluster-clk-mux", &v)) {
++		pr_info("CPU%u: cluster clock mux 0x%x -> 0x%x\n", cpu,
++			readl_relaxed(l2 + CLUSTER_CLK_MUX), v);
++		writel_relaxed(v, l2 + CLUSTER_CLK_MUX);
++		mb();
++		udelay(5);
++	}
++
+ 	pr_info("CPU%u: powering the L2 up (vctl 0x%x)\n", cpu, vctl);
+ 	/* SPM: Q2S channel ignored, no legacy mode; then the L2 rail */
+ 	writel_relaxed(0x2, q2s);

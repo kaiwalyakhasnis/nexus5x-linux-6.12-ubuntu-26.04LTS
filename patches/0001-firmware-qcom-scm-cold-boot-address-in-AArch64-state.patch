@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: bullhead-linux <kaiwalyakhasnis57@gmail.com>
 Date: Sat, 31 Oct 2026 06:53:29 +0900
-Subject: [PATCH 1/7] firmware: qcom: scm: cold boot address in AArch64 state
+Subject: [PATCH 1/9] firmware: qcom: scm: cold boot address in AArch64 state
 
 From oneplus2-mainline (github.com/luvingiane/oneplus2-mainline, patch 0009,
 GPL-2.0). MSM8992/MSM8994 firmware has no PSCI; without the AArch64 flag in

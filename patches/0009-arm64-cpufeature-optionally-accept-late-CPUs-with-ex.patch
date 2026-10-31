@@ -1,0 +1,65 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bullhead-linux <kaiwalyakhasnis57@gmail.com>
+Date: Sat, 31 Oct 2026 11:16:42 +0900
+Subject: [PATCH 9/9] arm64: cpufeature: optionally accept late CPUs with extra
+ capabilities
+
+From oneplus2-mainline (github.com/luvingiane/oneplus2-mainline, patch
+0011, GPL-2.0). Without PSCI the secondary cores start at late init, once
+the SCM driver is up, so the system capabilities are decided by the A53
+cluster alone. The A57s then have Spectre-v2 and errata (832075, 1319367,
+1742098) the system did not enable, and mainline refuses them.
+
+arm64.late_cpu_conflicts=warn lets such a CPU in with a warning; it runs
+without those mitigations and workarounds. Acceptable for an experiment on
+this phone, not for upstream. (Starting the cores from smp_init() instead
+made the RPM SMD link fail on every boot of this phone.)
+---
+ arch/arm64/kernel/cpufeature.c | 26 +++++++++++++++++++++++++-
+ 1 file changed, 25 insertions(+), 1 deletion(-)
+
+diff --git a/arch/arm64/kernel/cpufeature.c b/arch/arm64/kernel/cpufeature.c
+index 8246015fd..ef2875581 100644
+--- a/arch/arm64/kernel/cpufeature.c
++++ b/arch/arm64/kernel/cpufeature.c
+@@ -3275,6 +3275,23 @@ static void __init enable_cpu_capabilities(u16 scope_mask)
+  * If the system has already detected a capability, take necessary
+  * action on this CPU.
+  */
++/*
++ * Firmware without PSCI (MSM8992/MSM8994): the A57 cluster can only be
++ * started once the SCM driver is up, after the system capabilities were
++ * decided by the A53 cluster. With "arm64.late_cpu_conflicts=warn" a late
++ * CPU that has a capability the system lacks (Spectre-v2, A57 errata) is let
++ * in with a warning and runs without that mitigation or workaround.
++ * From oneplus2-mainline (patch 0011, GPL-2.0).
++ */
++static bool late_cpu_conflicts_warn;
++
++static int __init parse_late_cpu_conflicts(char *str)
++{
++	late_cpu_conflicts_warn = str && !strcmp(str, "warn");
++	return 0;
++}
++early_param("arm64.late_cpu_conflicts", parse_late_cpu_conflicts);
++
+ static void verify_local_cpu_caps(u16 scope_mask)
+ {
+ 	int i;
+@@ -3311,8 +3328,15 @@ static void verify_local_cpu_caps(u16 scope_mask)
+ 			 * Check if the CPU has this capability if it isn't
+ 			 * safe to have when the system doesn't.
+ 			 */
+-			if (cpu_has_cap && !cpucap_late_cpu_permitted(caps))
++			if (cpu_has_cap && !cpucap_late_cpu_permitted(caps)) {
++				if (late_cpu_conflicts_warn) {
++					pr_warn("CPU%d: capability %d (%s) not enabled system-wide, CPU runs without it\n",
++						smp_processor_id(), caps->capability,
++						caps->desc);
++					continue;
++				}
+ 				break;
++			}
+ 		}
+ 	}
+ 

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: bullhead-linux <kaiwalyakhasnis57@gmail.com>
 Date: Sat, 31 Oct 2026 06:55:25 +0900
-Subject: [PATCH 6/7] drm/msm/mdp5: add the MSM8992 (MDP 1.10) configuration
+Subject: [PATCH 6/9] drm/msm/mdp5: add the MSM8992 (MDP 1.10) configuration
 
 Mainline knows MDP 1.9 (MSM8994) but not 1.10, the MSM8992's cut-down
 version, so the display driver gives up with "unexpected MDP minor
