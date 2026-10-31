@@ -2,7 +2,7 @@
 # ubuntu-chroot [command...]: enter the Ubuntu root in RAM (/ubuntu) that
 # tools/ubuntu/ubuntu-on-phone.sh unpacked from the PC. apt reaches the
 # internet through the PC's proxy (tools/ubuntu/usb-proxy.py, 172.16.42.2:3128).
-R=/ubuntu
+R=${UBUNTU_ROOT:-/ubuntu}
 [ -x $R/bin/bash ] || { echo "no Ubuntu in $R: run tools/ubuntu/ubuntu-on-phone.sh on the PC"; exit 1; }
 for d in proc sys dev dev/pts tmp; do mkdir -p $R/$d; done
 mountpoint -q $R/proc || mount -t proc proc $R/proc

@@ -1,0 +1,37 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bullhead-linux <kaiwalyakhasnis57@gmail.com>
+Date: Sat, 31 Oct 2026 16:29:39 +0900
+Subject: [PATCH 16/20] clk: qcom: gcc-msm8994: PCIe PHY pipe resets
+
+From oneplus2-mainline (github.com/luvingiane/oneplus2-mainline, patch 0022, GPL-2.0); the same GCC on MSM8992.
+---
+ drivers/clk/qcom/gcc-msm8994.c               | 3 +++
+ include/dt-bindings/clock/qcom,gcc-msm8994.h | 2 ++
+ 2 files changed, 5 insertions(+)
+
+diff --git a/drivers/clk/qcom/gcc-msm8994.c b/drivers/clk/qcom/gcc-msm8994.c
+index c44256b3c..12957f06d 100644
+--- a/drivers/clk/qcom/gcc-msm8994.c
++++ b/drivers/clk/qcom/gcc-msm8994.c
+@@ -2650,6 +2650,9 @@ static const struct qcom_reset_map gcc_msm8994_resets[] = {
+ 	[MSS_RESET] = { 0x1680 },
+ 	[PCIE_PHY_0_RESET] = { 0x1b18 },
+ 	[PCIE_PHY_1_RESET] = { 0x1b98 },
++	/* the PHYs' pipe side (CAF PCIE_PHY_n_PHY_BCR, the pipe clocks' BCR) */
++	[PCIE_PHY_0_PHY_RESET] = { 0x1b14 },
++	[PCIE_PHY_1_PHY_RESET] = { 0x1b94 },
+ 	[QUSB2_PHY_RESET] = { 0x04b8 },
+ };
+ 
+diff --git a/include/dt-bindings/clock/qcom,gcc-msm8994.h b/include/dt-bindings/clock/qcom,gcc-msm8994.h
+index f6836f430..6707e3037 100644
+--- a/include/dt-bindings/clock/qcom,gcc-msm8994.h
++++ b/include/dt-bindings/clock/qcom,gcc-msm8994.h
+@@ -175,5 +175,7 @@
+ #define PCIE_PHY_1_RESET		3
+ #define QUSB2_PHY_RESET			4
+ #define MSS_RESET				5
++#define PCIE_PHY_0_PHY_RESET		6
++#define PCIE_PHY_1_PHY_RESET		7
+ 
+ #endif

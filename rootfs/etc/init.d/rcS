@@ -24,6 +24,9 @@ else
 	echo "rcS: no USB device controller (normal in QEMU)"
 fi
 
+# Wi-Fi: ath10k needs the phone's own calibration (modprobe ath10k_pci)
+/usr/share/learn/wlan-board.sh /lib/firmware
+
 # Leave a boot report in persistent RAM. It survives a warm reboot, so you
 # can read it back from Android/TWRP: cat /sys/fs/pstore/pmsg-ramoops-0
 [ -c /dev/pmsg0 ] && /usr/share/learn/report.sh > /dev/pmsg0

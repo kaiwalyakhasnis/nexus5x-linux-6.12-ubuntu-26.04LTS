@@ -1,0 +1,177 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bullhead-linux <kaiwalyakhasnis57@gmail.com>
+Date: Sat, 31 Oct 2026 16:30:33 +0900
+Subject: [PATCH] PCI: qcom: add MSM8994/MSM8992
+
+The apq8084 (1.0.0) controller as the CAF kernel's pci-msm.c drives it on
+MSM8994/MSM8992, after oneplus2-mainline (patch 0020, GPL-2.0), without its
+bring-up debugging: optional controller reset, aux clock at 1.01 MHz, PHY
+power-up through PARF_PHY_CTRL, PARF_SYS_CTRL 0x365e, DBI at offset 0 with
+a 16 MiB slave address space, TrustZone restore_sec_cfg (qcom,scm-dev-id),
+link training through PARF_LTSSM.
+---
+ drivers/pci/controller/dwc/pcie-qcom.c | 116 +++++++++++++++++++++++++
+ 1 file changed, 116 insertions(+)
+
+diff --git a/drivers/pci/controller/dwc/pcie-qcom.c b/drivers/pci/controller/dwc/pcie-qcom.c
+index 81ba04ced..b2381c110 100644
+--- a/drivers/pci/controller/dwc/pcie-qcom.c
++++ b/drivers/pci/controller/dwc/pcie-qcom.c
+@@ -12,6 +12,7 @@
+ #include <linux/crc8.h>
+ #include <linux/debugfs.h>
+ #include <linux/delay.h>
++#include <linux/firmware/qcom/qcom_scm.h>
+ #include <linux/gpio/consumer.h>
+ #include <linux/interconnect.h>
+ #include <linux/interrupt.h>
+@@ -179,6 +180,7 @@ struct qcom_pcie_resources_1_0_0 {
+ 	int num_clks;
+ 	struct reset_control *core;
+ 	struct regulator *vdda;
++	struct regulator *vddpe;	/* MSM8994/8992: the endpoint's power, optional */
+ };
+ 
+ #define QCOM_PCIE_2_1_0_MAX_RESETS		6
+@@ -557,6 +559,105 @@ static int qcom_pcie_get_resources_1_0_0(struct qcom_pcie *pcie)
+ 	return PTR_ERR_OR_ZERO(res->core);
+ }
+ 
++/*
++ * MSM8994/MSM8992: the apq8084 (1.0.0) controller, as the CAF kernel's
++ * pci-msm.c msm_pcie_enable() drives it. After oneplus2-mainline
++ * (github.com/luvingiane/oneplus2-mainline, patch 0020, GPL-2.0):
++ * gcc-msm8994 has no controller reset (optional here), the aux clock runs
++ * at 1.01 MHz, the PHY is powered up through PARF_PHY_CTRL, PARF_SYS_CTRL
++ * takes 0x365e, DBI sits at offset 0 with a 16 MiB slave address space,
++ * TrustZone restores the controller's security config (qcom,scm-dev-id),
++ * and link training goes through PARF_LTSSM as on 2.3.2. The endpoint's
++ * power (vddpe-3v3, e.g. the Wi-Fi chip's enable) is switched on first.
++ */
++static int qcom_pcie_get_resources_msm8994(struct qcom_pcie *pcie)
++{
++	struct qcom_pcie_resources_1_0_0 *res = &pcie->res.v1_0_0;
++	struct device *dev = pcie->pci->dev;
++
++	res->vdda = devm_regulator_get(dev, "vdda");
++	if (IS_ERR(res->vdda))
++		return PTR_ERR(res->vdda);
++
++	res->num_clks = devm_clk_bulk_get_all(dev, &res->clks);
++	if (res->num_clks < 0) {
++		dev_err(dev, "Failed to get clocks\n");
++		return res->num_clks;
++	}
++
++	res->vddpe = devm_regulator_get_optional(dev, "vddpe-3v3");
++	if (IS_ERR(res->vddpe)) {
++		if (PTR_ERR(res->vddpe) != -ENODEV)
++			return PTR_ERR(res->vddpe);
++		res->vddpe = NULL;
++	}
++
++	res->core = devm_reset_control_get_optional_exclusive(dev, "core");
++	return PTR_ERR_OR_ZERO(res->core);
++}
++
++static int qcom_pcie_init_1_0_0(struct qcom_pcie *pcie);
++
++static int qcom_pcie_init_msm8994(struct qcom_pcie *pcie)
++{
++	struct qcom_pcie_resources_1_0_0 *res = &pcie->res.v1_0_0;
++	struct device *dev = pcie->pci->dev;
++	u32 val;
++	int ret, i;
++
++	if (res->vddpe) {
++		ret = regulator_enable(res->vddpe);
++		if (ret)
++			return ret;
++	}
++
++	/* the PCIe power domain is on (runtime PM) by now, so the aux RCG takes it */
++	for (i = 0; i < res->num_clks; i++)
++		if (!strcmp(res->clks[i].id, "aux"))
++			clk_set_rate(res->clks[i].clk, 1011000);
++
++	ret = qcom_pcie_init_1_0_0(pcie);
++	if (ret)
++		return ret;
++	/* the aux clock only runs 5-7 ms after its enable */
++	usleep_range(10000, 11000);
++
++	val = readl(pcie->parf + PARF_PHY_CTRL);
++	val &= ~PHY_TEST_PWR_DOWN;
++	writel(val, pcie->parf + PARF_PHY_CTRL);
++
++	writel(0x365e, pcie->parf + PARF_SYS_CTRL);
++	writel(0, pcie->parf + PARF_DBI_BASE_ADDR);
++	writel(SZ_16M, pcie->parf + PARF_SLV_ADDR_SPACE_SIZE);
++
++	if (!of_property_read_u32(dev->of_node, "qcom,scm-dev-id", &val)) {
++		ret = qcom_scm_restore_sec_cfg(val, 0);
++		if (ret)
++			dev_warn(dev, "TZ restore_sec_cfg(%u): %d\n", val, ret);
++	}
++
++	return 0;
++}
++
++/*
++ * As 1.0.0, minus qcom_pcie_configure_dbi_base(): the 3.10 driver keeps the
++ * DBI base at 0 and a 16 MiB slave space (set in init above), and the first
++ * DBI access hangs the bus with the CPU address and 2 GiB there.
++ */
++static int qcom_pcie_post_init_msm8994(struct qcom_pcie *pcie)
++{
++	if (IS_ENABLED(CONFIG_PCI_MSI)) {
++		u32 val = readl(pcie->parf + PARF_AXI_MSTR_WR_ADDR_HALT);
++
++		val |= EN;
++		writel(val, pcie->parf + PARF_AXI_MSTR_WR_ADDR_HALT);
++	}
++
++	qcom_pcie_clear_hpc(pcie->pci);
++
++	return 0;
++}
++
+ static void qcom_pcie_deinit_1_0_0(struct qcom_pcie *pcie)
+ {
+ 	struct qcom_pcie_resources_1_0_0 *res = &pcie->res.v1_0_0;
+@@ -1310,6 +1411,16 @@ static const struct qcom_pcie_ops ops_2_1_0 = {
+ };
+ 
+ /* Qcom IP rev.: 1.0.0	Synopsys IP rev.: 4.11a */
++static void qcom_pcie_2_3_2_ltssm_enable(struct qcom_pcie *pcie);
++
++static const struct qcom_pcie_ops ops_msm8994 = {
++	.get_resources = qcom_pcie_get_resources_msm8994,
++	.init = qcom_pcie_init_msm8994,
++	.post_init = qcom_pcie_post_init_msm8994,
++	.deinit = qcom_pcie_deinit_1_0_0,
++	.ltssm_enable = qcom_pcie_2_3_2_ltssm_enable,
++};
++
+ static const struct qcom_pcie_ops ops_1_0_0 = {
+ 	.get_resources = qcom_pcie_get_resources_1_0_0,
+ 	.init = qcom_pcie_init_1_0_0,
+@@ -1378,6 +1489,10 @@ static const struct qcom_pcie_cfg cfg_1_0_0 = {
+ 	.ops = &ops_1_0_0,
+ };
+ 
++static const struct qcom_pcie_cfg cfg_msm8994 = {
++	.ops = &ops_msm8994,
++};
++
+ static const struct qcom_pcie_cfg cfg_1_9_0 = {
+ 	.ops = &ops_1_9_0,
+ };
+@@ -1844,6 +1959,7 @@ static const struct of_device_id qcom_pcie_match[] = {
+ 	{ .compatible = "qcom,pcie-ipq8074", .data = &cfg_2_3_3 },
+ 	{ .compatible = "qcom,pcie-ipq8074-gen3", .data = &cfg_2_9_0 },
+ 	{ .compatible = "qcom,pcie-ipq9574", .data = &cfg_2_9_0 },
++	{ .compatible = "qcom,pcie-msm8994", .data = &cfg_msm8994 },
+ 	{ .compatible = "qcom,pcie-msm8996", .data = &cfg_2_3_2 },
+ 	{ .compatible = "qcom,pcie-qcs404", .data = &cfg_2_4_0 },
+ 	{ .compatible = "qcom,pcie-sa8540p", .data = &cfg_sc8280xp },

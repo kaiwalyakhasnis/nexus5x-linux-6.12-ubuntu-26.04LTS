@@ -1,0 +1,40 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bullhead-linux <kaiwalyakhasnis57@gmail.com>
+Date: Sat, 31 Oct 2026 16:29:39 +0900
+Subject: [PATCH 18/20] clk: qcom: gcc-msm8994: do not wait for the PCIe aux
+ branch status
+
+From oneplus2-mainline (github.com/luvingiane/oneplus2-mainline, patch 0028, GPL-2.0); the same GCC on MSM8992.
+
+On the OnePlus 2 the gcc_pcie_N_aux_clk status bit clears 5-7 ms after
+the enable, at 19.2 MHz or at 1.01 MHz (measured on the phone, s90), far
+longer than the branch halt check waits, so enabling it fails with
+"status stuck at off" although the clock then runs.
+---
+ drivers/clk/qcom/gcc-msm8994.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/drivers/clk/qcom/gcc-msm8994.c b/drivers/clk/qcom/gcc-msm8994.c
+index 57352091b..4dcf7af8c 100644
+--- a/drivers/clk/qcom/gcc-msm8994.c
++++ b/drivers/clk/qcom/gcc-msm8994.c
+@@ -1772,6 +1772,9 @@ static struct clk_branch gcc_mss_q6_bimc_axi_clk = {
+ 
+ static struct clk_branch gcc_pcie_0_aux_clk = {
+ 	.halt_reg = 0x1ad4,
++	/* the status bit clears 5-7 ms after the enable (s90): longer than
++	 * the halt check waits, so do not check it */
++	.halt_check = BRANCH_HALT_SKIP,
+ 	.clkr = {
+ 		.enable_reg = 0x1ad4,
+ 		.enable_mask = BIT(0),
+@@ -1840,6 +1843,9 @@ static struct clk_branch gcc_pcie_0_slv_axi_clk = {
+ 
+ static struct clk_branch gcc_pcie_1_aux_clk = {
+ 	.halt_reg = 0x1b54,
++	/* the status bit clears 5-7 ms after the enable (s90): longer than
++	 * the halt check waits, so do not check it */
++	.halt_check = BRANCH_HALT_SKIP,
+ 	.clkr = {
+ 		.enable_reg = 0x1b54,
+ 		.enable_mask = BIT(0),

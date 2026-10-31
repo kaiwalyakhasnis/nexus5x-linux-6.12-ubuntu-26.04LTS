@@ -14,3 +14,4 @@
 #include "bullhead-cpr.dtsi"
 #include "bullhead-touch.dtsi"
 #include "bullhead-usb.dtsi"
+#include "bullhead-wifi.dtsi"

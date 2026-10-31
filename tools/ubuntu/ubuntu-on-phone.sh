@@ -36,6 +36,8 @@ mkdir -p "$K"
 rm -f "$K/known_hosts"	# a fresh Ubuntu has fresh host keys
 PUB=$(cat "$K/id_ed25519.pub")
 echo "installing openssh-server in Ubuntu (apt through the proxy)"
-(sleep 1; echo "ubuntu-chroot /bin/bash -c 'DEBIAN_FRONTEND=noninteractive apt-get update -q >/dev/null && DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends openssh-server >/dev/null; mkdir -p /root/.ssh /run/sshd; chmod 700 /root/.ssh; echo \"$PUB\" > /root/.ssh/authorized_keys; chmod 600 /root/.ssh/authorized_keys; ssh-keygen -A >/dev/null; /usr/sbin/sshd && echo SSHD_UP'"; sleep 240) \
-	| timeout 245 nc $PHONE 23 2>/dev/null | tr -d '\r' | grep -a SSHD_UP || { echo "SSH setup failed"; exit 1; }
+OUT=$( (sleep 1; echo "ubuntu-chroot /bin/bash -c 'DEBIAN_FRONTEND=noninteractive apt-get update -q >/dev/null && DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends openssh-server >/dev/null; mkdir -p /root/.ssh /run/sshd; chmod 700 /root/.ssh; echo \"$PUB\" > /root/.ssh/authorized_keys; chmod 600 /root/.ssh/authorized_keys; ssh-keygen -A >/dev/null; /usr/sbin/sshd && echo SSHD_UP'"; sleep 240) \
+	| timeout 245 nc $PHONE 23 2>/dev/null | tr -d '\r' || true)
+# the telnet session ends by timeout; the marker alone on a line is the result
+grep -aqx SSHD_UP <<<"$OUT" || { echo "SSH setup failed"; exit 1; }
 "$TOP/tools/ubuntu/ssh-phone.sh" 'grep PRETTY /etc/os-release'

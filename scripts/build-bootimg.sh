@@ -21,4 +21,9 @@ for rev in rev-101 rev-10; do
 	python3 "$TOP/scripts/mkbootimg.py" \
 		--kernel "$TOP/out/Image.gz-dtb-$rev" --ramdisk "$TOP/out/initramfs.cpio.gz" \
 		--cmdline "$CMDLINE panel_lg_bullhead_jd35695b.keep=1" -o "$TOP/out/boot-$rev-keep.img"
+	# Ubuntu from the PC's disk (tools/ubuntu/nbd-root.sh; rootfs/init). The
+	# classic interface names keep udev from renaming usb0 under the NBD root.
+	python3 "$TOP/scripts/mkbootimg.py" \
+		--kernel "$TOP/out/Image.gz-dtb-$rev" --ramdisk "$TOP/out/initramfs.cpio.gz" \
+		--cmdline "$CMDLINE ubuntu=nbd net.ifnames=0" -o "$TOP/out/boot-ubuntu-$rev.img"
 done

@@ -6,7 +6,13 @@ TOP=$(cd "$(dirname "$0")/.." && pwd)
 IMG=${1:-$TOP/out/boot-rev-10.img}
 if ping -c1 -W1 172.16.42.1 >/dev/null 2>&1; then
 	echo "our kernel: reboot-to bootloader"
-	(sleep 1; echo 'reboot-to bootloader'; sleep 2) | timeout 6 nc 172.16.42.1 23 >/dev/null 2>&1
+	# sync first: under Ubuntu the root disk is on the PC (ubuntu=nbd). Ubuntu
+	# has no telnet: SSH there (tools/ubuntu/ssh-phone.sh, this PC's key).
+	if timeout 2 bash -c '</dev/tcp/172.16.42.1/23' 2>/dev/null; then
+		(sleep 1; echo 'sync; reboot-to bootloader'; sleep 3) | timeout 7 nc 172.16.42.1 23 >/dev/null 2>&1
+	else
+		timeout 15 "$TOP/tools/ubuntu/ssh-phone.sh" 'sync; reboot-to bootloader' </dev/null >/dev/null 2>&1
+	fi
 fi
 for i in $(seq 1 90); do
 	[ -n "$(fastboot devices)" ] && break

@@ -11,6 +11,14 @@ cp "$TOP/out/busybox/busybox" "$STAGE/bin/busybox"
 aarch64-linux-gnu-gcc -static -Os -s -o "$STAGE/sbin/reboot-to" "$TOP/tools/reboot-to/reboot-to.c"
 # touchtest [seconds]: paint what the touchscreen reports
 aarch64-linux-gnu-gcc -static -Os -s -o "$STAGE/usr/bin/touchtest" "$TOP/tools/touchtest/touchtest.c"
+# Wi-Fi: the modules from build-kernel.sh and the QCA6174 firmware. The
+# board data (calibration) is the phone's own, copied at boot from its vendor
+# partition (rootfs/usr/share/learn/wlan-board.sh), so no image carries it.
+cp -a "$TOP/out/modules/." "$STAGE/"
+FW=$STAGE/lib/firmware/ath10k/QCA6174/hw3.0
+mkdir -p "$FW"
+cp "$TOP/downloads/linux-firmware/firmware-6.bin" "$TOP/downloads/linux-firmware/notice_ath10k_firmware-6.txt" "$FW/"
+cp "$TOP"/downloads/linux-firmware/regulatory.db* "$STAGE/lib/firmware/"
 ln -sf /bin/busybox "$STAGE/sbin/init"
 ln -sf busybox "$STAGE/bin/sh"
 # /dev/console must exist before devtmpfs is mounted, or init has no stdout.

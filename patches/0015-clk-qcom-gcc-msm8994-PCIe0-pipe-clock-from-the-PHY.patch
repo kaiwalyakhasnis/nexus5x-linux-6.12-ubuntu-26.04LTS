@@ -1,0 +1,68 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bullhead-linux <kaiwalyakhasnis57@gmail.com>
+Date: Sat, 31 Oct 2026 16:29:38 +0900
+Subject: [PATCH 15/20] clk: qcom: gcc-msm8994: PCIe0 pipe clock from the PHY
+
+From oneplus2-mainline (github.com/luvingiane/oneplus2-mainline, patch 0021, GPL-2.0); the same GCC on MSM8992.
+
+OnePlus 2 bring-up: pcie_0_pipe_clk_src is fed by the PCIe PHY's pipe
+output (CAF clock-gcc-8994.c: F_EXT(125000000, pcie_pipe), source value 2),
+not by XO. Add "pcie_0_pipe" as a second parent (fw_name on the GCC node).
+---
+ drivers/clk/qcom/gcc-msm8994.c | 31 ++++++++++++++++++++++++++-----
+ 1 file changed, 26 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/clk/qcom/gcc-msm8994.c b/drivers/clk/qcom/gcc-msm8994.c
+index 6a6b7da2b..c44256b3c 100644
+--- a/drivers/clk/qcom/gcc-msm8994.c
++++ b/drivers/clk/qcom/gcc-msm8994.c
+@@ -27,6 +27,7 @@ enum {
+ 	P_XO,
+ 	P_GPLL0,
+ 	P_GPLL4,
++	P_PCIE_0_PIPE,
+ };
+ 
+ static struct clk_alpha_pll gpll0_early = {
+@@ -877,16 +878,36 @@ static const struct freq_tbl ftbl_pcie_pipe_clk_src[] = {
+ 	{ }
+ };
+ 
++/*
++ * OnePlus 2 bring-up: PCIe0's pipe clock comes from the PHY (CAF
++ * clock-gcc-8994.c: F_EXT(125 MHz, pcie_pipe), source 2), not from XO;
++ * with XO the PHY never reports ready. The PHY driver provides it as
++ * "pcie_0_pipe" (fw_name on the GCC node).
++ */
++static const struct freq_tbl ftbl_pcie_0_pipe_clk_src[] = {
++	F(125000000, P_PCIE_0_PIPE, 1, 0, 0),
++	{ }
++};
++
++static const struct parent_map gcc_xo_pcie_0_pipe_map[] = {
++	{ P_XO, 0 },
++	{ P_PCIE_0_PIPE, 2 },
++};
++
++static const struct clk_parent_data gcc_xo_pcie_0_pipe[] = {
++	{ .fw_name = "xo" },
++	{ .fw_name = "pcie_0_pipe" },
++};
++
+ static struct clk_rcg2 pcie_0_pipe_clk_src = {
+ 	.cmd_rcgr = 0x1adc,
+ 	.hid_width = 5,
+-	.freq_tbl = ftbl_pcie_pipe_clk_src,
++	.parent_map = gcc_xo_pcie_0_pipe_map,
++	.freq_tbl = ftbl_pcie_0_pipe_clk_src,
+ 	.clkr.hw.init = &(struct clk_init_data){
+ 		.name = "pcie_0_pipe_clk_src",
+-		.parent_data = &(const struct clk_parent_data){
+-				.fw_name = "xo",
+-		},
+-		.num_parents = 1,
++		.parent_data = gcc_xo_pcie_0_pipe,
++		.num_parents = ARRAY_SIZE(gcc_xo_pcie_0_pipe),
+ 		.ops = &clk_rcg2_ops,
+ 	},
+ };

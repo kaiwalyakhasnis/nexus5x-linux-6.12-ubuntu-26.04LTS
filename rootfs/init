@@ -12,6 +12,15 @@ mount -t tmpfs    tmpfs    /run
 mount -t tmpfs    tmpfs    /tmp
 mount -t pstore   pstore   /sys/fs/pstore 2>/dev/null
 mount -t configfs configfs /sys/kernel/config 2>/dev/null
+
+# "ubuntu=nbd" on the kernel command line: boot Ubuntu (systemd) from a disk
+# the PC serves over the USB network (tools/ubuntu/nbd-root.sh), instead of
+# this initramfs' own system. Nothing on the phone's storage is used. Any
+# failure falls through to the BusyBox system below, telnet included.
+if grep -qw ubuntu=nbd /proc/cmdline; then
+	/usr/share/learn/ubuntu-nbd.sh && exec switch_root /newroot /sbin/init
+	echo "init: no Ubuntu disk from the PC, staying in BusyBox"
+fi
 echo "init: API filesystems mounted, handing over to busybox init"
 # Stage 2 – replace ourselves (same PID 1) with a real init that reads /etc/inittab.
 exec /sbin/init

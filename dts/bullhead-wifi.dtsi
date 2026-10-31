@@ -1,0 +1,150 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * Wi-Fi: the QCA6174 on PCIe0, from the 3.10 qcom/msm8992.dtsi (pcie0,
+ * qcom,cnss, wlan_vreg) and lge/msm8992-bullhead*.dtsi:
+ *
+ *   PCIe0: PARF 0xfc520000, PHY 0xfc526000, DBI 0xff000000, ELBI
+ *   0xff000f20, config 0xff100000, I/O 0xff200000, memory 0xff300000
+ *   (13 MiB); MSI SPI 243, INTA-D SPI 244/245/247/248; PERST GPIO 35,
+ *   CLKREQ GPIO 36, WAKE GPIO 37; supplies L12 1.8 V and L28; GDSC pcie_0;
+ *   TrustZone scm-dev-id 11; qcom,vbg-opt (PHY bandgap trims).
+ *   Chip: vdd-wlan = PM8994 GPIO 9 (also the Bluetooth PA), io S4, xtal L30,
+ *   bootstrap GPIO 1 (bullhead), WLAN_EN GPIO 113.
+ *
+ * Power-up order as 3.10 cnss_pci.c: vdd-wlan, bootstrap high, WLAN_EN high.
+ * WLAN_EN is modelled as a regulator fed by vdd-wlan, and is the PCIe slot
+ * power (vddpe-3v3), so the chip is up before link training.
+ *
+ * Kernel patches: "phy: qcom: add the MSM8994/MSM8992 PCIe PHY", "PCI: qcom:
+ * add MSM8994/MSM8992" and the gcc-msm8994 PCIe clock/reset ones.
+ */
+
+/ {
+	vdd_wlan: regulator-vdd-wlan {
+		compatible = "regulator-fixed";
+		regulator-name = "vdd_wlan";
+		gpio = <&pm8994_gpios 9 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		startup-delay-us = <4000>;
+		regulator-always-on;
+	};
+
+	wlan_en: regulator-wlan-en {
+		compatible = "regulator-fixed";
+		regulator-name = "wlan_en";
+		gpio = <&tlmm 113 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		vin-supply = <&vdd_wlan>;
+		/* cnss_pci.c WLAN_ENABLE_DELAY */
+		startup-delay-us = <10000>;
+	};
+};
+
+/* the chip's io and crystal rails */
+&pm8994_s4 {
+	regulator-always-on;
+};
+
+&pm8994_l30 {
+	regulator-always-on;
+};
+
+&tlmm {
+	wlan_bootstrap: wlan-bootstrap-hog {
+		gpio-hog;
+		gpios = <1 GPIO_ACTIVE_HIGH>;
+		output-high;
+		line-name = "wlan-bootstrap";
+	};
+
+	pcie0_default: pcie0-default-state {
+		perst-pins {
+			pins = "gpio35";
+			function = "gpio";
+			drive-strength = <2>;
+			bias-pull-down;
+		};
+		clkreq-pins {
+			pins = "gpio36";
+			function = "pci_e1";
+			drive-strength = <2>;
+			bias-pull-up;
+		};
+		wake-pins {
+			pins = "gpio37";
+			function = "gpio";
+			drive-strength = <2>;
+			bias-pull-down;
+		};
+	};
+};
+
+/* GCC's pcie_0_pipe_clk_src takes the PHY's pipe output */
+&gcc {
+	clock-names = "xo", "sleep", "pcie_0_pipe";
+	clocks = <&xo_board>, <&sleep_clk>, <&pcie0_phy>;
+};
+
+&soc {
+	pcie0_phy: phy@fc526000 {
+		compatible = "qcom,msm8994-pcie-phy";
+		reg = <0xfc526000 0x1000>;
+		clocks = <&rpmcc RPM_SMD_LN_BB_CLK>,
+			 <&gcc PCIE_0_PHY_LDO>,
+			 <&gcc GCC_PCIE_0_PIPE_CLK>;
+		clock-names = "ref", "ldo", "pipe";
+		resets = <&gcc PCIE_PHY_0_RESET>, <&gcc PCIE_PHY_0_PHY_RESET>;
+		reset-names = "phy", "pipe";
+		vdda-phy-supply = <&pm8994_l28>;
+		vdda-pll-supply = <&pm8994_l12>;
+		qcom,vbg-opt;
+		#phy-cells = <0>;
+		#clock-cells = <0>;
+		clock-output-names = "pcie_0_pipe_clk";
+	};
+
+	pcie0: pcie@ff000000 {
+		compatible = "qcom,pcie-msm8994";
+		reg = <0xff000000 0xf1d>,
+		      <0xff000f20 0xa8>,
+		      <0xfc520000 0x2000>,
+		      <0xff100000 0x100000>;
+		reg-names = "dbi", "elbi", "parf", "config";
+		device_type = "pci";
+		linux,pci-domain = <0>;
+		bus-range = <0x00 0xff>;
+		num-lanes = <1>;
+		#address-cells = <3>;
+		#size-cells = <2>;
+		ranges = <0x81000000 0x0 0x0 0xff200000 0x0 0x100000>,
+			 <0x82000000 0x0 0xff300000 0xff300000 0x0 0xd00000>;
+
+		interrupts = <GIC_SPI 243 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "msi";
+		#interrupt-cells = <1>;
+		interrupt-map-mask = <0 0 0 0x7>;
+		interrupt-map = <0 0 0 1 &intc GIC_SPI 244 IRQ_TYPE_LEVEL_HIGH>,
+				<0 0 0 2 &intc GIC_SPI 245 IRQ_TYPE_LEVEL_HIGH>,
+				<0 0 0 3 &intc GIC_SPI 247 IRQ_TYPE_LEVEL_HIGH>,
+				<0 0 0 4 &intc GIC_SPI 248 IRQ_TYPE_LEVEL_HIGH>;
+
+		clocks = <&gcc GCC_PCIE_0_CFG_AHB_CLK>,
+			 <&gcc GCC_PCIE_0_MSTR_AXI_CLK>,
+			 <&gcc GCC_PCIE_0_SLV_AXI_CLK>,
+			 <&gcc GCC_PCIE_0_AUX_CLK>;
+		clock-names = "iface", "master_bus", "slave_bus", "aux";
+		power-domains = <&gcc PCIE_0_GDSC>;
+		vdda-supply = <&pm8994_l28>;
+		vddpe-3v3-supply = <&wlan_en>;
+
+		phys = <&pcie0_phy>;
+		phy-names = "pciephy";
+
+		perst-gpios = <&tlmm 35 GPIO_ACTIVE_LOW>;
+		wake-gpios = <&tlmm 37 GPIO_ACTIVE_HIGH>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&pcie0_default>;
+
+		qcom,scm-dev-id = <11>;
+	};
+};

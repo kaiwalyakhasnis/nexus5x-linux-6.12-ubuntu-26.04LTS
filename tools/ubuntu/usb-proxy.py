@@ -2,7 +2,8 @@
 """A small HTTP proxy for the phone, so apt in the Ubuntu chroot reaches the
 internet through this PC without NAT or root: plain HTTP requests (apt with
 http:// mirrors) and CONNECT tunnels (https). It listens only on the USB
-network address, 172.16.42.2:3128 by default.
+network address, 172.16.42.2:3128 by default. GET /time answers this PC's
+clock (seconds since 1970), which the phone takes at boot: it has no RTC.
 
 usage: usb-proxy.py [address] [port]
 """
@@ -10,6 +11,7 @@ import select
 import socket
 import socketserver
 import sys
+import time
 from urllib.parse import urlsplit
 
 
@@ -51,6 +53,14 @@ class Proxy(socketserver.StreamRequestHandler):
             print('CONNECT', target, flush=True)
             pipe(self.connection, up)
             up.close()
+            return
+
+        # not a proxy request: the phone (no RTC) asks for this PC's clock at
+        # boot (rootfs/usr/share/learn/ubuntu-nbd.sh)
+        if target == '/time':
+            body = f'{int(time.time())}\n'.encode()
+            self.wfile.write(b'HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\n'
+                             b'Content-Length: %d\r\n\r\n' % len(body) + body)
             return
 
         u = urlsplit(target)

@@ -7,14 +7,16 @@
 > who knows these drivers. Read it as notes from an experiment, not a reference,
 > and use it at your own risk (`fastboot boot` only, never flash it).
 
-> **Work in progress.** Display, touch, a USB keyboard and mouse, all 6 cores, CPU frequency scaling and an Ubuntu 26.04 userspace work; much of the phone does not yet (see the table below).
+> **Work in progress.** Display, touch, a USB keyboard and mouse, all 6 cores, CPU frequency scaling, Wi-Fi and an Ubuntu 26.04 desktop (shown on a PC over USB) work; much of the phone does not yet (see the table below).
 
 The LG Nexus 5X (bullhead, Snapdragon 808 / MSM8992) running a kernel.org
 6.12 LTS kernel (plain upstream stable, not Android's ACK/GKI) with a static
 BusyBox userspace. It has the real MDP5/DSI display driver, multitouch, USB
 host for a keyboard, all 6 CPU cores and CPU frequency scaling up to the
 stock 1.44/1.82 GHz. It boots to a BusyBox shell on the panel, and Ubuntu
-26.04.1 LTS runs on top of it in RAM (`ubuntu-chroot`, see Build and boot).
+26.04.1 LTS runs on top of it in RAM (`ubuntu-chroot`, see Build and boot),
+or boots as the whole system with an XFCE desktop shown on a PC (see
+[Ubuntu desktop on the PC](#ubuntu-desktop-on-the-pc)).
 Nothing gets flashed: `fastboot boot` loads it into RAM, and a reboot goes
 back to whatever is installed.
 
@@ -30,7 +32,7 @@ Tested on a rev_1.0 board (LGH791, bootloader BHZ32c).
 
 | | Part | Notes |
 |---|---|---|
-| ✅ | Boot with `fastboot boot` (RAM only) | Image 26 MiB, under the bootloader's ~29.5 MiB limit |
+| ✅ | Boot with `fastboot boot` (RAM only) | Image 27 MiB, under the bootloader's ~29.5 MiB limit |
 | ✅ | 4 × Cortex-A53 (CPU0-3) | 384-1440 MHz (stock speed bin 1 table), schedutil |
 | ✅ | 2 × Cortex-A57 (CPU4-5) | 384-1824 MHz (stock speed bin 0 table), schedutil. They join late with `arm64.late_cpu_conflicts=warn`, so they run without their Spectre-v2 mitigation and A57 errata workarounds (832075 can rarely hang the CPU) |
 | ✅ | Display: MDP5 1.10 + DSI + JD35695B panel driver | Framebuffer console with a 16×32 font (67×60 characters) |
@@ -38,9 +40,11 @@ Tested on a rev_1.0 board (LGH791, bootloader BHZ32c).
 | ✅ | Touchscreen (Synaptics S3320, RMI4) | Mainline `rmi4` over I2C, 10-finger multitouch on `/dev/input/event2`. `touchtest` on the phone paints what it reports |
 | ✅ | USB network (NCM) + telnet | `telnet 172.16.42.1`. `conspy 1` lets you type into the shell on the panel |
 | ✅ | USB host: keyboard | A USB keyboard on a USB-C OTG adapter types into the shell on the panel (tty1; Alt+F2 shows the status screen). The FUSB301 switches the port to host and turns on 5 V; the PC's USB network comes back when it is plugged in again |
-| ✅ | Ubuntu 26.04.1 LTS userspace | Ubuntu Base (arm64) unpacked into RAM and entered with `ubuntu-chroot`. `apt` works through a proxy on the PC, and an SSH server gives a full Ubuntu login from the PC. Not the init system (BusyBox still boots), and gone after a reboot |
+| ✅ | Ubuntu 26.04.1 LTS userspace | Ubuntu Base (arm64) unpacked into RAM and entered with `ubuntu-chroot`. `apt` works through a proxy on the PC, and an SSH server gives a full Ubuntu login from the PC. Gone after a reboot |
+| ✅ | Ubuntu desktop on the PC | Ubuntu with systemd as the whole system, its root disk a file on the PC (NBD over the USB network). XFCE runs in TigerVNC and shows in the PC's browser (noVNC). Software rendering |
+| ✅ | Wi-Fi (QCA6174 on PCIe) | PCIe Gen 1 x1 link, mainline `ath10k` with linux-firmware's `firmware-6.bin`. Scans 2.4 and 5 GHz, WPA2, DHCP. The calibration comes from the phone's own vendor partition |
 | ✅ | USB host: mouse | A USB mouse on the same adapter works like any USB HID device. `touchtest` shows a pointer and paints with the left button |
-| ✅ | eMMC detected, pstore/ramoops, QEMU `virt` | eMMC is never mounted or written |
+| ✅ | eMMC detected, pstore/ramoops, QEMU `virt` | eMMC is never written. Only the vendor partition is mounted, read-only, for the Wi-Fi calibration |
 | ✅ | Temperature sensors (TSENS) | 13 thermal zones in `/sys/class/thermal`, calibrated from the phone's fuses. Each shuts the phone down at 115 °C, the stock reset temperature |
 | ✅ | CPU voltages (CPR open loop) | Per-speed voltages from the chip's own fuses, computed like 3.10's `cpr-regulator`, within the stock floor and ceiling. The MX memory rail is voted per speed, and the A53 rail stays high enough for the CCI |
 | ⚠️ | Thermal throttling | Configured with the stock limits from 3.10's `msm_thermal`: all CPUs slow down from 60 °C, the A57s are capped at 768 MHz from 100 °C. Not yet seen to trigger (load tests peak near 49 °C) |
@@ -49,7 +53,7 @@ Tested on a rev_1.0 board (LGH791, bootloader BHZ32c).
 | ⚠️ | Boot-time `WARNING` from `wled_ovp_work` | An unbalanced `enable_irq`, because the bootloader leaves the backlight on. Cosmetic |
 | ❌ | Closed-loop CPR, thermal core control | The CPR hardware loop that trims voltage below open loop (stock runs 1440 MHz at 1115 mV, here 1160 mV). The stock core offlining (LG: from 90 °C) has no mainline equivalent |
 | ❌ | GPU (Adreno 418), IOMMU | Scanout uses a contiguous carveout instead |
-| ❌ | Wi-Fi/BT, modem, audio, camera, sensors, battery/charging | Not attempted |
+| ❌ | Bluetooth, modem, audio, camera, sensors, battery/charging, RTC | Not attempted |
 
 ## The hacks it takes
 
@@ -92,8 +96,9 @@ a shell on CPU0. These are the extra pieces:
    `arm64.late_cpu_conflicts=warn` for the A57s.
 7. **Device tree values**: the WLED OVP comes from the PMI8994 table (29.5 V),
    and the DSI supplies (L2, L12, L28) come from the 3.10 dtsi.
-8. **Size diet** (`scripts/kernel.config`): everything is built in and there
-   are no modules, so the image fits the bootloader's load window.
+8. **Size diet** (`scripts/kernel.config`): everything is built in, so the
+   image fits the bootloader's load window. The only modules are Wi-Fi's
+   (cfg80211, mac80211, ath10k), carried in the initramfs.
 9. **TSENS** (0010): the 8992's sensor block is TSENS v1 with 16 sensors, 13 of
    them used. Its calibration fuses are decoded as in 3.10's
    `tsens_calib_8992_sensors()`.
@@ -144,12 +149,40 @@ a shell on CPU0. These are the extra pieces:
     and failed over SSH. `scripts/build-busybox.sh` applies the fix.
 17. **No RTC driver yet**: the phone starts in 1970, and `apt` rejects
     Release files from the "future". `ubuntu-on-phone.sh` sets the clock from
-    the PC.
+    the PC, and the Ubuntu boot asks `usb-proxy.py` for it.
+18. **Wi-Fi** (0015-0020): mainline has no MSM8994 PCIe. 0015-0018 fix
+    GCC's PCIe clocks and resets, 0019 is the 20nm PCIe PHY, and 0020 adds
+    the controller. The PHY only locks with bullhead's `qcom,vbg-opt`
+    bandgap trims from 3.10, and the DBI base must stay at 0 (upstream's CPU
+    address hangs the bus). The chip's calibration (`bdwlan30.bin`) is a
+    vendor file, so it is copied at boot from the phone's own vendor partition.
 
-Patches 0001-0004 and 0009 come from
+Patches 0001-0004, 0009 and 0015-0018 come from
 [oneplus2-mainline](https://github.com/luvingiane/oneplus2-mainline)
-(OnePlus 2, MSM8994, GPL-2.0). Each value was checked against the Nexus 5X's
-own 3.10 kernel source. Patches 0005-0008 and 0010-0014 are new.
+(OnePlus 2, MSM8994, GPL-2.0), and 0019 is adapted from its PHY driver. Each
+value was checked against the Nexus 5X's own 3.10 kernel source. Patches
+0005-0008, 0010-0014 and 0020 are new.
+
+## Ubuntu desktop on the PC
+
+<img src="screenshots/vnc-desktop.png" width="800">
+
+Ubuntu 26.04.1 with XFCE runs on the phone and shows in the PC's browser over
+the USB cable. Nothing is flashed: the kernel boots from RAM, and Ubuntu's
+disk is a file on the PC that the phone reads and writes over USB (NBD), so
+keep the PC side running.
+
+1. From the [releases](../../releases), get `nexus5x-ubuntu-desktop-*.tar`
+   and `ubuntu-26.04-xfce-nexus5x.img.zst`. Unpack the tar and put the disk
+   in its folder.
+2. `sudo apt install fastboot adb qemu-utils zstd`. Unlocked bootloader;
+   phone on USB in Android (USB debugging on) or fastboot.
+3. `./nexus5x-desktop.sh`. The browser opens `http://172.16.42.1:6080`; the
+   VNC password is shown on the phone's screen (or `./show-password.sh`).
+
+Wi-Fi: `sudo nmtui` in the desktop's terminal. To build the disk yourself:
+`tools/ubuntu/nbd-root.sh`, `nbd-install.sh`, `desktop-setup.sh`, then
+`make-release-disk.sh` and `make-release.sh` for the release files.
 
 ## Build and boot
 
@@ -187,15 +220,15 @@ telnet 172.16.42.1                 # PC side gets 172.16.42.2 over DHCP
 
 | Path | What it is |
 |---|---|
-| `patches/` | The 14 kernel patches above, applied by `scripts/prepare-kernel.sh` |
-| `dts/` | Board files: mainline `msm8992-lg-bullhead`, `bullhead-smp.dtsi` (ACC for CPU1-5, A57 L2 and clock mux), `bullhead-display.dtsi` (MDSS, DSI, panel, WLED), `bullhead-thermal.dtsi` (QFPROM, TSENS, thermal zones), `bullhead-cpufreq.dtsi` (rails, CPU clocks, throttling), `bullhead-cpr.dtsi` (CPR nodes, OPP tables; generated), `bullhead-touch.dtsi` (I2C2, touchscreen), `bullhead-usb.dtsi` (FUSB301, OTG VBUS, dual-role dwc3) |
+| `patches/` | The 20 kernel patches above, applied by `scripts/prepare-kernel.sh` |
+| `dts/` | Board files: mainline `msm8992-lg-bullhead`, `bullhead-smp.dtsi` (ACC for CPU1-5, A57 L2 and clock mux), `bullhead-display.dtsi` (MDSS, DSI, panel, WLED), `bullhead-thermal.dtsi` (QFPROM, TSENS, thermal zones), `bullhead-cpufreq.dtsi` (rails, CPU clocks, throttling), `bullhead-cpr.dtsi` (CPR nodes, OPP tables; generated), `bullhead-touch.dtsi` (I2C2, touchscreen), `bullhead-usb.dtsi` (FUSB301, OTG VBUS, dual-role dwc3), `bullhead-wifi.dtsi` (PCIe0, its PHY, the QCA6174's power) |
 | `scripts/kernel.config` | Options built into the kernel, plus the size diet |
-| `rootfs/` | `/init` (mounts, then hands off to BusyBox init), `inittab` (shell on tty1, status screen on tty2), `rcS` (USB gadget, telnetd), boot report |
+| `rootfs/` | `/init` (mounts, then hands off to BusyBox init, or with `ubuntu=nbd` to Ubuntu via `ubuntu-nbd.sh`), `inittab` (shell on tty1, status screen on tty2), `rcS` (USB gadget, telnetd), `wlan-board.sh`, boot report |
 | `scripts/mkbootimg.py` | A ~60-line Android boot image writer |
 | `tools/gen-jd35695b-gamma.py` | Turns the 3.10 panel gamma tables into the driver's header |
 | `tools/cpr/` | `cpr_open_loop.py` (the open-loop voltages from a fuse dump, to check against) and `gen-cpr-dtsi.py` |
 | `tools/touchtest/` | `touchtest [seconds]`: paints each finger's path (and a USB mouse's, with a pointer) and logs input; c clears, q quits. Built into the initramfs as `/usr/bin/touchtest` |
-| `tools/ubuntu/` | `ubuntu-on-phone.sh` (Ubuntu Base into RAM, clock, SSH), `usb-proxy.py` (apt's proxy on the PC), `ssh-phone.sh` (log in, or `screen` to mirror the panel); `ubuntu-chroot` is in the initramfs |
+| `tools/ubuntu/` | `ubuntu-on-phone.sh` (Ubuntu Base into RAM, clock, SSH), `usb-proxy.py` (apt's proxy and the clock on the PC), `ssh-phone.sh` (log in, or `screen` to mirror the panel); `ubuntu-chroot` is in the initramfs. Desktop: `nexus5x-desktop.sh` (all in one), `nbd-root.sh` (the disk), `nbd-install.sh`, `desktop-setup.sh`, `desktop-open.sh`, `show-password.sh`, `make-release-disk.sh`, `make-release.sh` |
 | `patches-busybox/` | BusyBox fixes, applied by `scripts/build-busybox.sh` |
 | `tools/reboot-to/` | `reboot-to bootloader\|recovery`: reboot with a reason, built into the initramfs |
 | `scripts/phone-boot.sh` | From wherever the phone is, to fastboot, then `fastboot boot` an image |

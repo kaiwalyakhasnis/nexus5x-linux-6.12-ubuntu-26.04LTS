@@ -20,6 +20,28 @@ make -C "$KSRC" O="$KOUT" -j"$(nproc)" Image.gz
 for rev in rev-101 rev-10; do
 	make -C "$KSRC" O="$KOUT" qcom/msm8992-lg-bullhead-$rev-learn.dtb
 done
+# Only the modules the initramfs carries (defconfig's other =m are not built),
+# installed with their modules.dep into out/modules.
+MODS="lib/crypto/libarc4.ko net/rfkill/rfkill.ko net/wireless/cfg80211.ko net/mac80211/mac80211.ko
+	drivers/net/wireless/ath/ath.ko drivers/net/wireless/ath/ath10k/ath10k_core.ko
+	drivers/net/wireless/ath/ath10k/ath10k_pci.ko"
+make -C "$KSRC" O="$KOUT" -j"$(nproc)" $MODS
+KVER=$(cat "$KOUT/include/config/kernel.release")
+rm -rf "$TOP/out/modules"
+mkdir -p "$TOP/out/modules/lib/modules/$KVER/kernel"
+for m in $MODS; do
+	install -D -m 644 "$KOUT/$m" "$TOP/out/modules/lib/modules/$KVER/kernel/$m"
+	${CROSS_COMPILE}strip --strip-debug "$TOP/out/modules/lib/modules/$KVER/kernel/$m"
+done
+# no full modules_install here, so give depmod the lists it expects
+touch "$TOP/out/modules/lib/modules/$KVER"/modules.{order,builtin,builtin.modinfo}
+depmod -b "$TOP/out/modules" "$KVER"
+# a dependency that is =m but not in MODS would be missing on the phone
+for m in $MODS; do
+	for d in $(modinfo -F depends "$KOUT/$m" | tr , ' '); do
+		grep -q "/$d.ko" <<<"$MODS" || echo "WARNING: $m needs $d.ko, not in MODS"
+	done
+done
 # Show any fragment option that did not stick (missing dependency). A disabled
 # option may also vanish from .config entirely, which is fine.
 grep -E '^CONFIG_' "$TOP/scripts/kernel.config" | while read -r opt; do
