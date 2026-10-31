@@ -9,6 +9,11 @@
 
 > **Work in progress.** Display, touch, a USB keyboard and mouse, all 6 cores, CPU frequency scaling, Wi-Fi and an Ubuntu 26.04 desktop (shown on a PC over USB) work; much of the phone does not yet (see the table below).
 
+<img src="screenshots/vnc-desktop.png" width="800">
+
+*Ubuntu 26.04.1 with XFCE running on the phone, shown in the PC's browser over
+the USB cable ([how](#ubuntu-desktop-on-the-pc)).*
+
 The LG Nexus 5X (bullhead, Snapdragon 808 / MSM8992) running a kernel.org
 6.12 LTS kernel (plain upstream stable, not Android's ACK/GKI) with a static
 BusyBox userspace. It has the real MDP5/DSI display driver, multitouch, USB
@@ -164,8 +169,6 @@ value was checked against the Nexus 5X's own 3.10 kernel source. Patches
 0005-0008, 0010-0014 and 0020 are new.
 
 ## Ubuntu desktop on the PC
-
-<img src="screenshots/vnc-desktop.png" width="800">
 
 Ubuntu 26.04.1 with XFCE runs on the phone and shows in the PC's browser over
 the USB cable. Nothing is flashed: the kernel boots from RAM, and Ubuntu's
