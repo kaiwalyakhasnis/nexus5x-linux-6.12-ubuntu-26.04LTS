@@ -1,0 +1,58 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * USB host for keyboards and mice, or device (the USB network) for a PC,
+ * chosen by the Type-C CC controller.
+ *
+ * - FUSB301 (3.10 lge/msm8992-bullhead-misc.dtsi fusb301@21): i2c_5 (BLSP2
+ *   QUP5, 0xf9967000) at 0x21, interrupt GPIO 57 falling edge. Kernel patch
+ *   "usb: misc: add FUSB301".
+ * - VBUS out: the PMI8994 charger's OTG boost (otg block 0x1100, battery
+ *   interface 0x1200 on SPMI USID 2). Kernel patch "regulator: add PMI8994
+ *   OTG boost".
+ * - dwc3 dual role, gadget by default so the PC link works without the
+ *   FUSB301 driver too.
+ *
+ * The BLSP BAM DMA engines do not probe here: the bus runs in PIO mode.
+ */
+&spmi_bus {
+	pmic@2 {
+		usb_otg_vbus: usb-otg-vbus@1100 {
+			compatible = "qcom,pmi8994-otg-vbus";
+			reg = <0x1100>, <0x1200>;
+			regulator-name = "usb_otg_vbus";
+		};
+	};
+};
+
+&usb3 {
+	usb3_dwc3: usb@f9200000 {
+		dr_mode = "otg";
+		usb-role-switch;
+		role-switch-default-mode = "peripheral";
+	};
+};
+
+&blsp2_i2c5 {
+	status = "okay";
+	/delete-property/ dmas;
+	/delete-property/ dma-names;
+
+	typec@21 {
+		compatible = "fcs,fusb301";
+		reg = <0x21>;
+		interrupts-extended = <&tlmm 57 IRQ_TYPE_EDGE_FALLING>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&fusb301_int_default>;
+		vbus-supply = <&usb_otg_vbus>;
+		usb-role-switch = <&usb3_dwc3>;
+	};
+};
+
+&tlmm {
+	fusb301_int_default: fusb301-int-default-state {
+		pins = "gpio57";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-pull-up;
+	};
+};

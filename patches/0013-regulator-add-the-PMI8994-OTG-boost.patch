@@ -1,0 +1,187 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bullhead-linux <kaiwalyakhasnis57@gmail.com>
+Date: Sat, 31 Oct 2026 13:45:09 +0900
+Subject: [PATCH 13/14] regulator: add the PMI8994 OTG boost
+
+The PMI8994 charger's OTG boost, which puts 5 V on the USB port for a
+device plugged into it, after the 3.10 kernel's qpnp-smbcharger.c
+smbchg_otg_regulator_enable()/_disable(): pulse skipping off (OTG_TRIM6
+TR_ENB_SKIP, a secured register), 20 ms, then CMD_CHG_REG OTG_EN; the
+reverse to disable. Nothing else of the charger is touched.
+---
+ drivers/regulator/Kconfig            |   7 ++
+ drivers/regulator/Makefile           |   1 +
+ drivers/regulator/qcom-pmi8994-otg.c | 137 +++++++++++++++++++++++++++
+ 3 files changed, 145 insertions(+)
+ create mode 100644 drivers/regulator/qcom-pmi8994-otg.c
+
+diff --git a/drivers/regulator/Kconfig b/drivers/regulator/Kconfig
+index 39297f7d8..826185fb4 100644
+--- a/drivers/regulator/Kconfig
++++ b/drivers/regulator/Kconfig
+@@ -1109,6 +1109,13 @@ config REGULATOR_QCOM_SPMI
+ 	  Qualcomm SPMI PMICs as a module. The module will be named
+ 	  "qcom_spmi-regulator".
+ 
++config REGULATOR_QCOM_PMI8994_OTG
++	tristate "Qualcomm PMI8994 OTG boost (USB VBUS out)"
++	depends on MFD_SPMI_PMIC || COMPILE_TEST
++	help
++	  The PMI8994 charger's OTG boost, which powers a device plugged
++	  into the USB port.
++
+ config REGULATOR_QCOM_USB_VBUS
+ 	tristate "Qualcomm USB Vbus regulator driver"
+ 	depends on SPMI || COMPILE_TEST
+diff --git a/drivers/regulator/Makefile b/drivers/regulator/Makefile
+index 3d5a803dc..253319b66 100644
+--- a/drivers/regulator/Makefile
++++ b/drivers/regulator/Makefile
+@@ -203,3 +203,4 @@ obj-$(CONFIG_REGULATOR_WM8400) += wm8400-regulator.o
+ obj-$(CONFIG_REGULATOR_WM8994) += wm8994-regulator.o
+ 
+ ccflags-$(CONFIG_REGULATOR_DEBUG) += -DDEBUG
++obj-$(CONFIG_REGULATOR_QCOM_PMI8994_OTG) += qcom-pmi8994-otg.o
+diff --git a/drivers/regulator/qcom-pmi8994-otg.c b/drivers/regulator/qcom-pmi8994-otg.c
+new file mode 100644
+index 000000000..caf06a391
+--- /dev/null
++++ b/drivers/regulator/qcom-pmi8994-otg.c
+@@ -0,0 +1,137 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * The PMI8994 charger's OTG boost: 5 V out of the USB port for a device
++ * (keyboard, mouse) plugged into it. After the 3.10 kernel's
++ * qpnp-smbcharger.c smbchg_otg_regulator_enable()/_disable():
++ *
++ *   enable:  OTG_TRIM6 (otg + 0xf6) TR_ENB_SKIP: pulse skipping off
++ *            (secured register: 0xa5 to otg + 0xd0 first), 20 ms,
++ *            then CMD_CHG_REG (bat_if + 0x42) OTG_EN
++ *   disable: the reverse
++ *
++ * The rest of the charger is not touched; the bootloader's setup stays.
++ */
++
++#include <linux/delay.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++#include <linux/regmap.h>
++#include <linux/regulator/driver.h>
++#include <linux/regulator/of_regulator.h>
++
++#define CMD_CHG_REG		0x42
++#define OTG_EN			BIT(0)
++#define SEC_ACCESS		0xd0
++#define SEC_ACCESS_VALUE	0xa5
++#define OTG_TRIM6		0xf6
++#define TR_ENB_SKIP		BIT(2)
++
++struct pmi8994_otg {
++	struct regmap *map;
++	u32 otg_base, bat_if_base;
++};
++
++static int pmi8994_otg_pulse_skip(struct pmi8994_otg *o, bool disable)
++{
++	int ret = regmap_write(o->map, o->otg_base + SEC_ACCESS, SEC_ACCESS_VALUE);
++
++	return ret ?: regmap_update_bits(o->map, o->otg_base + OTG_TRIM6,
++					 TR_ENB_SKIP, disable ? TR_ENB_SKIP : 0);
++}
++
++static int pmi8994_otg_enable(struct regulator_dev *rdev)
++{
++	struct pmi8994_otg *o = rdev_get_drvdata(rdev);
++	int ret = pmi8994_otg_pulse_skip(o, true);
++
++	if (ret)
++		return ret;
++	/* make sure pulse skipping is really off */
++	msleep(20);
++	return regmap_update_bits(o->map, o->bat_if_base + CMD_CHG_REG,
++				  OTG_EN, OTG_EN);
++}
++
++static int pmi8994_otg_disable(struct regulator_dev *rdev)
++{
++	struct pmi8994_otg *o = rdev_get_drvdata(rdev);
++	int ret = regmap_update_bits(o->map, o->bat_if_base + CMD_CHG_REG,
++				     OTG_EN, 0);
++
++	return ret ?: pmi8994_otg_pulse_skip(o, false);
++}
++
++static int pmi8994_otg_is_enabled(struct regulator_dev *rdev)
++{
++	struct pmi8994_otg *o = rdev_get_drvdata(rdev);
++	unsigned int val;
++	int ret = regmap_read(o->map, o->bat_if_base + CMD_CHG_REG, &val);
++
++	return ret ?: !!(val & OTG_EN);
++}
++
++static const struct regulator_ops pmi8994_otg_ops = {
++	.enable = pmi8994_otg_enable,
++	.disable = pmi8994_otg_disable,
++	.is_enabled = pmi8994_otg_is_enabled,
++};
++
++static const struct regulator_desc pmi8994_otg_desc = {
++	.name = "usb-otg-vbus",
++	.ops = &pmi8994_otg_ops,
++	.type = REGULATOR_VOLTAGE,
++	.owner = THIS_MODULE,
++	.n_voltages = 1,
++	.fixed_uV = 5000000,
++};
++
++static int pmi8994_otg_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct regulator_config cfg = { };
++	struct regulator_dev *rdev;
++	struct pmi8994_otg *o;
++	int ret;
++
++	o = devm_kzalloc(dev, sizeof(*o), GFP_KERNEL);
++	if (!o)
++		return -ENOMEM;
++
++	o->map = dev_get_regmap(dev->parent, NULL);
++	if (!o->map)
++		return -ENODEV;
++
++	/* reg = <otg> <bat_if>: the charger's OTG and battery interface blocks */
++	ret = of_property_read_u32_index(dev->of_node, "reg", 0, &o->otg_base) ?:
++	      of_property_read_u32_index(dev->of_node, "reg", 1, &o->bat_if_base);
++	if (ret)
++		return dev_err_probe(dev, ret, "reg\n");
++
++	cfg.dev = dev;
++	cfg.driver_data = o;
++	cfg.of_node = dev->of_node;
++	cfg.init_data = of_get_regulator_init_data(dev, dev->of_node,
++						   &pmi8994_otg_desc);
++
++	rdev = devm_regulator_register(dev, &pmi8994_otg_desc, &cfg);
++	return PTR_ERR_OR_ZERO(rdev);
++}
++
++static const struct of_device_id pmi8994_otg_match[] = {
++	{ .compatible = "qcom,pmi8994-otg-vbus" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, pmi8994_otg_match);
++
++static struct platform_driver pmi8994_otg_driver = {
++	.probe = pmi8994_otg_probe,
++	.driver = {
++		.name = "qcom-pmi8994-otg",
++		.of_match_table = pmi8994_otg_match,
++	},
++};
++module_platform_driver(pmi8994_otg_driver);
++
++MODULE_DESCRIPTION("PMI8994 OTG boost (USB VBUS out)");
++MODULE_LICENSE("GPL");

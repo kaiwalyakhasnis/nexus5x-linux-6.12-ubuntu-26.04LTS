@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: bullhead-linux <kaiwalyakhasnis57@gmail.com>
 Date: Sat, 31 Oct 2026 12:36:32 +0900
-Subject: [PATCH 11/12] clk: qcom: add MSM8992 CPU cluster clocks
+Subject: [PATCH 11/14] clk: qcom: add MSM8992 CPU cluster clocks
 
 The A53 and A57 cluster clocks of MSM8992, after the 3.10 kernel's
 clock-cpu-8994.c (8994 v2 / 8992 tree) and the variable-rate PLL code in

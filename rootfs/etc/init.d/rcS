@@ -13,6 +13,13 @@ if [ -n "$UDC" ]; then
 	udhcpd /etc/udhcpd.conf
 	telnetd -l /bin/sh
 	echo "rcS: USB network up – from the PC: telnet 172.16.42.1"
+	# While a keyboard or mouse is plugged in, the USB controller is a host
+	# and the gadget is unbound; bind it again once it is a device again.
+	( G=/sys/kernel/config/usb_gadget/g1
+	  while sleep 2; do
+		u=$(ls /sys/class/udc 2>/dev/null | head -n1)
+		[ -n "$u" ] && [ -z "$(cat $G/UDC)" ] && echo "$u" > $G/UDC
+	  done ) &
 else
 	echo "rcS: no USB device controller (normal in QEMU)"
 fi

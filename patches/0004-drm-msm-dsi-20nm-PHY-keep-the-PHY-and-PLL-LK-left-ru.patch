@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: bullhead-linux <kaiwalyakhasnis57@gmail.com>
 Date: Sat, 31 Oct 2026 06:54:47 +0900
-Subject: [PATCH 04/12] drm/msm/dsi: 20nm PHY: keep the PHY and PLL LK left
+Subject: [PATCH 04/14] drm/msm/dsi: 20nm PHY: keep the PHY and PLL LK left
  running
 
 From oneplus2-mainline (patch 0003, GPL-2.0). Mainline has no 20nm DSI PLL

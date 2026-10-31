@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: bullhead-linux <kaiwalyakhasnis57@gmail.com>
 Date: Sat, 31 Oct 2026 11:29:02 +0900
-Subject: [PATCH 10/12] thermal/drivers/qcom/tsens: add MSM8992
+Subject: [PATCH 10/14] thermal/drivers/qcom/tsens: add MSM8992
 
 TSENS on MSM8992 is v1.2 with the v1 register layout (status at TM 0x44,
 TRDY at TM 0x84) but 16 sensors, 13 of them used (hw ids 0-5, 7, 9-14).

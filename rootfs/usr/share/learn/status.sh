@@ -1,5 +1,5 @@
 #!/bin/sh
-# Shown on the phone panel (tty1). Refreshes every 2 s.
+# Shown on the phone panel (tty2: Alt+F2 or chvt 2). Refreshes every 2 s.
 while :; do
 	clear
 	echo "  Nexus 5X - mainline Linux $(uname -r)"

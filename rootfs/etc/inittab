@@ -2,7 +2,10 @@
 ::sysinit:/etc/init.d/rcS
 # QEMU: interactive shell on the serial port
 ::respawn:/usr/share/learn/serial-shell.sh
-# Phone: no keyboard, so the panel shows a live status screen instead
-tty1::respawn:/usr/share/learn/status.sh
+# Phone: the panel starts on a shell (type on it with a USB keyboard through an
+# OTG adapter, or from the PC with `conspy 1` over telnet); the live status
+# screen is on tty2 (Alt+F2, Alt+F1 back; or chvt 2 / chvt 1)
+tty1::respawn:-/bin/sh
+tty2::respawn:/usr/share/learn/status.sh
 ::ctrlaltdel:/sbin/reboot
 ::shutdown:/bin/umount -a -r

@@ -1,0 +1,283 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bullhead-linux <kaiwalyakhasnis57@gmail.com>
+Date: Sat, 31 Oct 2026 13:45:09 +0900
+Subject: [PATCH 14/14] usb: misc: add the FUSB301 Type-C CC controller
+
+The Fairchild FUSB301 on the Nexus 5X, after the 3.10 kernel's
+drivers/usb/misc/fusb301.c, cut down to the data role: a sink attached
+(keyboard, mouse, OTG adapter) turns VBUS on and switches the USB role to
+host; a source (PC, charger) or detach switches back to device and VBUS
+off. VBUS is never turned on while the chip sees it present. The chip is
+only reprogrammed when it is not in a dual-role mode, so a PC link up at
+boot is kept. Try.SNK emulation, accessories and the rev 1.0 BC level
+workaround are not ported.
+---
+ drivers/usb/misc/Kconfig   |   8 ++
+ drivers/usb/misc/Makefile  |   1 +
+ drivers/usb/misc/fusb301.c | 229 +++++++++++++++++++++++++++++++++++++
+ 3 files changed, 238 insertions(+)
+ create mode 100644 drivers/usb/misc/fusb301.c
+
+diff --git a/drivers/usb/misc/Kconfig b/drivers/usb/misc/Kconfig
+index 9bf8fc624..53da926f4 100644
+--- a/drivers/usb/misc/Kconfig
++++ b/drivers/usb/misc/Kconfig
+@@ -287,6 +287,14 @@ config USB_HSIC_USB4604
+ 	help
+ 	  This option enables support for SMSC USB4604 HSIC to USB 2.0 Driver.
+ 
++config USB_FUSB301
++	tristate "Fairchild FUSB301 USB Type-C CC controller"
++	depends on I2C && USB_ROLE_SWITCH
++	help
++	  The FUSB301 as on the Nexus 5X: switches the USB role to host and
++	  turns VBUS on when a device (keyboard, mouse, OTG adapter) is
++	  plugged in, and back to device mode for a PC or charger.
++
+ config USB_LINK_LAYER_TEST
+ 	tristate "USB Link Layer Test driver"
+ 	help
+diff --git a/drivers/usb/misc/Makefile b/drivers/usb/misc/Makefile
+index 0cd5bc8f5..5b2265191 100644
+--- a/drivers/usb/misc/Makefile
++++ b/drivers/usb/misc/Makefile
+@@ -34,3 +34,4 @@ obj-$(CONFIG_USB_SISUSBVGA)		+= sisusbvga/
+ obj-$(CONFIG_USB_LINK_LAYER_TEST)	+= lvstest.o
+ obj-$(CONFIG_BRCM_USB_PINMAP)		+= brcmstb-usb-pinmap.o
+ obj-$(CONFIG_USB_ONBOARD_DEV)		+= onboard_usb_dev.o
++obj-$(CONFIG_USB_FUSB301)		+= fusb301.o
+diff --git a/drivers/usb/misc/fusb301.c b/drivers/usb/misc/fusb301.c
+new file mode 100644
+index 000000000..152b29e18
+--- /dev/null
++++ b/drivers/usb/misc/fusb301.c
+@@ -0,0 +1,229 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Fairchild FUSB301 USB Type-C CC controller, as on the Nexus 5X, after the
++ * 3.10 kernel's drivers/usb/misc/fusb301.c, cut down to the data role:
++ *
++ *   sink attached (a keyboard, mouse or OTG adapter: Rd on CC) -> VBUS on
++ *   (vbus-supply), USB role host;
++ *   source attached (a PC or charger: Rp on CC) -> USB role device;
++ *   detach -> VBUS off, USB role device.
++ *
++ * The chip toggles as a dual-role port (DRP) by itself; LK leaves it so. It
++ * is only reprogrammed if it is not in a DRP mode, so a PC link that is up
++ * at boot is not dropped. Not ported: the software Try.SNK emulation (it
++ * only matters between two dual-role ports), accessory and current
++ * advertisement handling, the rev 1.0 BC level workaround.
++ */
++
++#include <linux/delay.h>
++#include <linux/i2c.h>
++#include <linux/interrupt.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/regulator/consumer.h>
++#include <linux/usb/role.h>
++
++#define REG_DEVICEID		0x01
++#define REG_MODES		0x02
++#define REG_CONTROL		0x03
++#define REG_MANUAL		0x04
++#define REG_MASK		0x10
++#define REG_STATUS		0x11
++#define REG_TYPE		0x12
++#define REG_INT			0x13
++
++#define MODE_DRP_ACC		BIT(5)
++#define MODE_DRP		BIT(4)
++
++#define CONTROL_INT_MASK	BIT(0)
++#define CONTROL_HOST_CUR	GENMASK(2, 1)
++#define HOST_CUR_DEFAULT	(1 << 1)
++
++#define MANUAL_ERR_REC		BIT(0)
++
++#define STATUS_ATTACH		BIT(0)
++#define STATUS_VBUS_OK		BIT(3)
++
++#define TYPE_SNK		BIT(4)
++#define TYPE_SRC		BIT(3)
++
++#define INT_DETACH		BIT(1)
++#define INT_ATTACH		BIT(0)
++
++struct fusb301 {
++	struct i2c_client *client;
++	struct regulator *vbus;
++	struct usb_role_switch *role_sw;
++	bool vbus_on;
++	enum usb_role role;
++};
++
++static int fusb301_read(struct fusb301 *f, u8 reg)
++{
++	return i2c_smbus_read_byte_data(f->client, reg);
++}
++
++static int fusb301_write(struct fusb301 *f, u8 reg, u8 val)
++{
++	return i2c_smbus_write_byte_data(f->client, reg, val);
++}
++
++static void fusb301_set_vbus(struct fusb301 *f, bool on)
++{
++	int ret;
++
++	if (!f->vbus || on == f->vbus_on)
++		return;
++	ret = on ? regulator_enable(f->vbus) : regulator_disable(f->vbus);
++	if (ret) {
++		dev_err(&f->client->dev, "VBUS %s: %d\n", on ? "on" : "off", ret);
++		return;
++	}
++	f->vbus_on = on;
++	dev_info(&f->client->dev, "VBUS %s\n", on ? "on" : "off");
++}
++
++static void fusb301_set_role(struct fusb301 *f, enum usb_role role)
++{
++	if (role == f->role)
++		return;
++	if (usb_role_switch_set_role(f->role_sw, role))
++		return;
++	f->role = role;
++	dev_info(&f->client->dev, "USB role: %s\n", usb_role_string(role));
++}
++
++/* bring the port in line with what the chip reports now */
++static void fusb301_update(struct fusb301 *f)
++{
++	int status = fusb301_read(f, REG_STATUS);
++	int type = fusb301_read(f, REG_TYPE);
++
++	if (status < 0 || type < 0)
++		return;
++
++	if (!(status & STATUS_ATTACH)) {
++		fusb301_set_vbus(f, false);
++		fusb301_set_role(f, USB_ROLE_DEVICE);
++		return;
++	}
++
++	if (type & TYPE_SNK) {
++		/* never drive VBUS against another source */
++		if (status & STATUS_VBUS_OK && !f->vbus_on) {
++			dev_warn(&f->client->dev, "sink attached but VBUS present\n");
++			return;
++		}
++		dev_info(&f->client->dev, "sink attached: host\n");
++		fusb301_set_vbus(f, true);
++		fusb301_set_role(f, USB_ROLE_HOST);
++	} else if (type & TYPE_SRC) {
++		dev_info(&f->client->dev, "source attached: device\n");
++		fusb301_set_vbus(f, false);
++		fusb301_set_role(f, USB_ROLE_DEVICE);
++	}
++}
++
++static irqreturn_t fusb301_irq(int irq, void *data)
++{
++	struct fusb301 *f = data;
++	int ints = fusb301_read(f, REG_INT);	/* read clears */
++
++	if (ints < 0)
++		return IRQ_NONE;
++	if (ints & (INT_ATTACH | INT_DETACH))
++		fusb301_update(f);
++	return IRQ_HANDLED;
++}
++
++static int fusb301_probe(struct i2c_client *client)
++{
++	struct device *dev = &client->dev;
++	struct fusb301 *f;
++	int id, mode, ctl, ret;
++
++	f = devm_kzalloc(dev, sizeof(*f), GFP_KERNEL);
++	if (!f)
++		return -ENOMEM;
++	f->client = client;
++	f->role = USB_ROLE_NONE;
++
++	id = fusb301_read(f, REG_DEVICEID);
++	if (id < 0)
++		return dev_err_probe(dev, id, "no FUSB301\n");
++
++	f->vbus = devm_regulator_get_optional(dev, "vbus");
++	if (IS_ERR(f->vbus)) {
++		if (PTR_ERR(f->vbus) != -ENODEV)
++			return PTR_ERR(f->vbus);
++		f->vbus = NULL;
++	}
++
++	f->role_sw = usb_role_switch_get(dev);
++	if (IS_ERR_OR_NULL(f->role_sw))
++		return dev_err_probe(dev, f->role_sw ? PTR_ERR(f->role_sw) : -EPROBE_DEFER,
++				     "USB role switch\n");
++
++	mode = fusb301_read(f, REG_MODES);
++	ctl = fusb301_read(f, REG_CONTROL);
++	if (mode < 0 || ctl < 0) {
++		ret = mode < 0 ? mode : ctl;
++		goto err;
++	}
++	dev_info(dev, "FUSB301 rev 0x%02x, mode 0x%02x, control 0x%02x\n",
++		 id, mode, ctl);
++
++	/* default USB current advertised when we are the source */
++	ctl = (ctl & ~(CONTROL_HOST_CUR | CONTROL_INT_MASK)) | HOST_CUR_DEFAULT;
++	ret = fusb301_write(f, REG_CONTROL, ctl) ?:
++	      fusb301_write(f, REG_MASK, 0);
++	if (ret)
++		goto err;
++	if (!(mode & (MODE_DRP | MODE_DRP_ACC))) {
++		ret = fusb301_write(f, REG_MODES, MODE_DRP) ?:
++		      fusb301_write(f, REG_MANUAL, MANUAL_ERR_REC);
++		if (ret)
++			goto err;
++	}
++
++	fusb301_read(f, REG_INT);
++	fusb301_update(f);
++
++	ret = devm_request_threaded_irq(dev, client->irq, NULL, fusb301_irq,
++					IRQF_ONESHOT, "fusb301", f);
++	if (ret)
++		goto err;
++
++	i2c_set_clientdata(client, f);
++	return 0;
++err:
++	usb_role_switch_put(f->role_sw);
++	return dev_err_probe(dev, ret, "init\n");
++}
++
++static void fusb301_remove(struct i2c_client *client)
++{
++	struct fusb301 *f = i2c_get_clientdata(client);
++
++	fusb301_set_vbus(f, false);
++	usb_role_switch_put(f->role_sw);
++}
++
++static const struct of_device_id fusb301_match[] = {
++	{ .compatible = "fcs,fusb301" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, fusb301_match);
++
++static struct i2c_driver fusb301_driver = {
++	.driver = {
++		.name = "fusb301",
++		.of_match_table = fusb301_match,
++	},
++	.probe = fusb301_probe,
++	.remove = fusb301_remove,
++};
++module_i2c_driver(fusb301_driver);
++
++MODULE_DESCRIPTION("FUSB301 USB Type-C CC controller (data role and VBUS)");
++MODULE_LICENSE("GPL");

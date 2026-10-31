@@ -7,16 +7,17 @@
 > who knows these drivers. Read it as notes from an experiment, not a reference,
 > and use it at your own risk (`fastboot boot` only, never flash it).
 
-> **Work in progress.** Display, touch, all 6 cores and CPU frequency scaling work; much of the phone does not yet (see the table below).
+> **Work in progress.** Display, touch, a USB keyboard, all 6 cores and CPU frequency scaling work; much of the phone does not yet (see the table below).
 
 The LG Nexus 5X (bullhead, Snapdragon 808 / MSM8992) running a kernel.org
 6.12 LTS kernel (plain upstream stable, not Android's ACK/GKI) with a static
-BusyBox userspace. It has the real MDP5/DSI display driver, multitouch, all 6
-CPU cores and CPU frequency scaling up to the stock 1.44/1.82 GHz.
+BusyBox userspace. It has the real MDP5/DSI display driver, multitouch, USB
+host for a keyboard, all 6 CPU cores and CPU frequency scaling up to the
+stock 1.44/1.82 GHz. It boots to a BusyBox shell on the panel.
 Nothing gets flashed: `fastboot boot` loads it into RAM, and a reboot goes
 back to whatever is installed.
 
-| Status screen (tty1) | BusyBox shell on the panel | `cat /proc/cpuinfo` | `top`, per-core view (`1`) | `touchtest`, two fingers |
+| Status screen (tty2) | BusyBox shell on the panel | `cat /proc/cpuinfo` | `top`, per-core view (`1`) | `touchtest`, two fingers |
 |:---:|:---:|:---:|:---:|:---:|
 | <img src="screenshots/status.png" width="260"> | <img src="screenshots/shell.png" width="260"> | <img src="screenshots/cpuinfo.png" width="260"> | <img src="screenshots/top.png" width="260"> | <img src="screenshots/touchtest.png" width="260"> |
 
@@ -34,7 +35,9 @@ Tested on a rev_1.0 board (LGH791, bootloader BHZ32c).
 | ✅ | Display: MDP5 1.10 + DSI + JD35695B panel driver | Framebuffer console with a 16×32 font (67×60 characters) |
 | ✅ | Backlight (PMI8994 WLED) | Stock limits: 15 mA per string, 29.5 V OVP |
 | ✅ | Touchscreen (Synaptics S3320, RMI4) | Mainline `rmi4` over I2C, 10-finger multitouch on `/dev/input/event2`. `touchtest` on the phone paints what it reports |
-| ✅ | USB network (NCM) + telnet | `telnet 172.16.42.1`. `conspy 2` lets you type into the shell on the panel |
+| ✅ | USB network (NCM) + telnet | `telnet 172.16.42.1`. `conspy 1` lets you type into the shell on the panel |
+| ✅ | USB host: keyboard | A USB keyboard on a USB-C OTG adapter types into the shell on the panel (tty1; Alt+F2 shows the status screen). The FUSB301 switches the port to host and turns on 5 V; the PC's USB network comes back when it is plugged in again |
+| ⚠️ | USB host: mouse | Detected like any USB HID device and handled by `touchtest` (pointer, paint with the left button), not yet tried |
 | ✅ | eMMC detected, pstore/ramoops, QEMU `virt` | eMMC is never mounted or written |
 | ✅ | Temperature sensors (TSENS) | 13 thermal zones in `/sys/class/thermal`, calibrated from the phone's fuses. Each shuts the phone down at 115 °C, the stock reset temperature |
 | ✅ | CPU voltages (CPR open loop) | Per-speed voltages from the chip's own fuses, computed like 3.10's `cpr-regulator`, within the stock floor and ceiling. The MX memory rail is voted per speed, and the A53 rail stays high enough for the CCI |
@@ -122,11 +125,21 @@ a shell on CPU0. These are the extra pieces:
     display driver sends. Writes into an mmap'd `/dev/fb0` don't tell the
     msm driver anything changed, so `touchtest` writes the changed rows back
     through `write()`, which does.
+15. **USB host** (0013, 0014): one USB-C port, managed by a Fairchild
+    FUSB301 CC controller that mainline has no driver for.
+    * 0014 is a cut-down port of 3.10's driver. A sink on CC (keyboard,
+      mouse, OTG adapter) turns VBUS on and switches dwc3 to host; a PC or
+      charger switches it back to device. It never turns VBUS on while VBUS
+      is already present.
+    * 0013 is that VBUS: the PMI8994 charger's OTG boost, with 3.10's exact
+      register sequence.
+    * dwc3 is dual-role, peripheral by default, so the PC link works without
+      them too. `rcS` rebinds the USB gadget when device mode comes back.
 
 Patches 0001-0004 and 0009 come from
 [oneplus2-mainline](https://github.com/luvingiane/oneplus2-mainline)
 (OnePlus 2, MSM8994, GPL-2.0). Each value was checked against the Nexus 5X's
-own 3.10 kernel source. Patches 0005-0008 and 0010-0012 are new.
+own 3.10 kernel source. Patches 0005-0008 and 0010-0014 are new.
 
 ## Build and boot
 
@@ -156,14 +169,14 @@ telnet 172.16.42.1                 # PC side gets 172.16.42.2 over DHCP
 
 | Path | What it is |
 |---|---|
-| `patches/` | The 12 kernel patches above, applied by `scripts/prepare-kernel.sh` |
-| `dts/` | Board files: mainline `msm8992-lg-bullhead`, `bullhead-smp.dtsi` (ACC for CPU1-5, A57 L2 and clock mux), `bullhead-display.dtsi` (MDSS, DSI, panel, WLED), `bullhead-thermal.dtsi` (QFPROM, TSENS, thermal zones), `bullhead-cpufreq.dtsi` (rails, CPU clocks, throttling), `bullhead-cpr.dtsi` (CPR nodes, OPP tables; generated), `bullhead-touch.dtsi` (I2C2, touchscreen) |
+| `patches/` | The 14 kernel patches above, applied by `scripts/prepare-kernel.sh` |
+| `dts/` | Board files: mainline `msm8992-lg-bullhead`, `bullhead-smp.dtsi` (ACC for CPU1-5, A57 L2 and clock mux), `bullhead-display.dtsi` (MDSS, DSI, panel, WLED), `bullhead-thermal.dtsi` (QFPROM, TSENS, thermal zones), `bullhead-cpufreq.dtsi` (rails, CPU clocks, throttling), `bullhead-cpr.dtsi` (CPR nodes, OPP tables; generated), `bullhead-touch.dtsi` (I2C2, touchscreen), `bullhead-usb.dtsi` (FUSB301, OTG VBUS, dual-role dwc3) |
 | `scripts/kernel.config` | Options built into the kernel, plus the size diet |
-| `rootfs/` | `/init` (mounts, then hands off to BusyBox init), `inittab`, `rcS` (USB gadget, telnetd), status screen, boot report |
+| `rootfs/` | `/init` (mounts, then hands off to BusyBox init), `inittab` (shell on tty1, status screen on tty2), `rcS` (USB gadget, telnetd), boot report |
 | `scripts/mkbootimg.py` | A ~60-line Android boot image writer |
 | `tools/gen-jd35695b-gamma.py` | Turns the 3.10 panel gamma tables into the driver's header |
 | `tools/cpr/` | `cpr_open_loop.py` (the open-loop voltages from a fuse dump, to check against) and `gen-cpr-dtsi.py` |
-| `tools/touchtest/` | `touchtest [seconds]`: paints each finger's path and logs touches, built into the initramfs as `/usr/bin/touchtest` |
+| `tools/touchtest/` | `touchtest [seconds]`: paints each finger's path (and a USB mouse's, with a pointer) and logs input; c clears, q quits. Built into the initramfs as `/usr/bin/touchtest` |
 | `tools/reboot-to/` | `reboot-to bootloader\|recovery`: reboot with a reason, built into the initramfs |
 | `scripts/phone-boot.sh` | From wherever the phone is, to fastboot, then `fastboot boot` an image |
 
