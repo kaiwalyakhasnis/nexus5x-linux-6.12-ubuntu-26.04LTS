@@ -10,3 +10,5 @@
 #include "bullhead-smp.dtsi"
 #include "bullhead-display.dtsi"
 #include "bullhead-thermal.dtsi"
+#include "bullhead-cpufreq.dtsi"
+#include "bullhead-cpr.dtsi"

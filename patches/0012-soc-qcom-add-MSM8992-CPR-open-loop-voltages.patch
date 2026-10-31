@@ -1,0 +1,577 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bullhead-linux <kaiwalyakhasnis57@gmail.com>
+Date: Sat, 31 Oct 2026 12:59:15 +0900
+Subject: [PATCH 12/12] soc: qcom: add MSM8992 CPR open-loop voltages
+
+Port of the open-loop part of the 3.10 kernel's cpr-regulator.c for
+MSM8992: from the chip's fuses (speed bin, CPR fuse revision, ring
+oscillator selects, per fuse corner init voltages) and the same qcom,cpr-*
+properties, compute each virtual corner's voltage, interpolated down within
+a fuse corner and limited to the floor/ceiling overrides, with the ceiling
+reduced to it (qcom,cpr-scaled-init-voltage-as-ceiling).
+
+The voltages go into the CPU OPP tables (dev_pm_opp_adjust_voltage); OPPs
+above the speed bin are disabled. The MX corner is voted through
+required-opps on the "mx" power domain. cpufreq-dt is started only after
+every cluster has its voltages, so MSM8992 goes on the cpufreq-dt-platdev
+blocklist.
+
+Not ported: the closed loop, redundant fuse rows.
+---
+ drivers/cpufreq/cpufreq-dt-platdev.c |   1 +
+ drivers/soc/qcom/Kconfig             |   8 +
+ drivers/soc/qcom/Makefile            |   1 +
+ drivers/soc/qcom/cpr-8992.c          | 504 +++++++++++++++++++++++++++
+ 4 files changed, 514 insertions(+)
+ create mode 100644 drivers/soc/qcom/cpr-8992.c
+
+diff --git a/drivers/cpufreq/cpufreq-dt-platdev.c b/drivers/cpufreq/cpufreq-dt-platdev.c
+index 9e86a0e8b..dd4649bc2 100644
+--- a/drivers/cpufreq/cpufreq-dt-platdev.c
++++ b/drivers/cpufreq/cpufreq-dt-platdev.c
+@@ -147,6 +147,7 @@ static const struct of_device_id blocklist[] __initconst = {
+ 
+ 	{ .compatible = "qcom,apq8096", },
+ 	{ .compatible = "qcom,msm8909", },
++	{ .compatible = "qcom,msm8992", },
+ 	{ .compatible = "qcom,msm8996", },
+ 	{ .compatible = "qcom,msm8998", },
+ 	{ .compatible = "qcom,qcm2290", },
+diff --git a/drivers/soc/qcom/Kconfig b/drivers/soc/qcom/Kconfig
+index 74b912124..bdf2ae9ec 100644
+--- a/drivers/soc/qcom/Kconfig
++++ b/drivers/soc/qcom/Kconfig
+@@ -62,6 +62,14 @@ config QCOM_MDT_LOADER
+ 	tristate
+ 	select QCOM_SCM
+ 
++config QCOM_CPR_8992
++	tristate "MSM8992 CPR open-loop CPU voltages"
++	depends on ARCH_QCOM && PM_OPP && CPUFREQ_DT
++	help
++	  Computes the MSM8992 CPU voltages from the chip's fuses, as the
++	  3.10 kernel's cpr-regulator does before its closed loop starts,
++	  puts them into the CPU OPP tables and starts cpufreq-dt.
++
+ config QCOM_OCMEM
+ 	tristate "Qualcomm On Chip Memory (OCMEM) driver"
+ 	depends on ARCH_QCOM
+diff --git a/drivers/soc/qcom/Makefile b/drivers/soc/qcom/Makefile
+index acbca2ab5..ab179f3ba 100644
+--- a/drivers/soc/qcom/Makefile
++++ b/drivers/soc/qcom/Makefile
+@@ -39,3 +39,4 @@ obj-$(CONFIG_QCOM_ICC_BWMON)	+= icc-bwmon.o
+ qcom_ice-objs			+= ice.o
+ obj-$(CONFIG_QCOM_INLINE_CRYPTO_ENGINE)	+= qcom_ice.o
+ obj-$(CONFIG_QCOM_PBS) +=	qcom-pbs.o
++obj-$(CONFIG_QCOM_CPR_8992)	+= cpr-8992.o
+diff --git a/drivers/soc/qcom/cpr-8992.c b/drivers/soc/qcom/cpr-8992.c
+new file mode 100644
+index 000000000..b1a9f71ee
+--- /dev/null
++++ b/drivers/soc/qcom/cpr-8992.c
+@@ -0,0 +1,504 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * MSM8992 CPR, open-loop part: the per-frequency CPU voltages the 3.10
++ * kernel's cpr-regulator.c computes from the chip's fuses before its closed
++ * loop takes over (cpr_pvs_per_corner_init(), cpr_adjust_init_voltages(),
++ * cpr_get_open_loop_voltage(), cpr_init_ceiling_floor_override_voltages(),
++ * cpr_limit_open_loop_voltage(), cpr_reduce_ceiling_voltage()), with the
++ * same qcom,cpr-* DT properties.
++ *
++ * One node per cluster. The voltages go into the OPP table of the cluster's
++ * CPUs ("qcom,cpus"); OPPs above the chip's speed bin are disabled. Once
++ * every cluster is done, cpufreq-dt is started, and the OPP core sets the
++ * voltage (vdd-apc-supply) and the MX corner (required-opps, power domain
++ * "mx") around each clock change. Without this driver cpufreq is not
++ * started at all.
++ *
++ * The CCI runs on the A53 rail too (3.10: vdd-cci-supply = apc0, with
++ * qcom,cci-speedbin0-v0 giving its corner per rate). It is not scaled here:
++ * with "qcom,cci-corner-map" the rail's corner for each A53 rate is at least
++ * the one for the CCI's present rate, as the stock regulator's vote
++ * aggregation would make it. If that rate cannot be read, the CCI's highest
++ * corner is used.
++ *
++ * Not ported: the closed loop (RBCPR), redundant fuse rows, per-CPU and
++ * quotient adjustments (closed loop only).
++ */
++
++#include <linux/clk.h>
++#include <linux/cpu.h>
++#include <linux/io.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/of_address.h>
++#include <linux/platform_device.h>
++#include <linux/pm_opp.h>
++#include <linux/pm_runtime.h>
++#include <linux/slab.h>
++
++#define MATCH_ANY	0xffffffff
++#define MAX_FUSE	8
++#define MAX_CORNERS	32
++#define FUSE_ROW_BYTES	8
++
++struct cpr_8992 {
++	struct device *dev;
++	void __iomem *efuse;
++	u32 nfc;			/* fuse corners */
++	u32 nc;				/* virtual corners */
++	u32 speed_bin, revision, pvs_version;
++	u32 ro_sel[MAX_FUSE];
++	int match;			/* qcom,cpr-fuse-version-map tuple */
++	u32 step;
++	int pvs[MAX_FUSE + 1];		/* per fuse corner, 1-based */
++	u32 fceil[MAX_FUSE + 1], ffloor[MAX_FUSE + 1];
++	u32 corner_map[MAX_CORNERS + 1];
++	u32 corner_max[MAX_FUSE + 1];
++	u32 freq[MAX_CORNERS + 1];
++	int open_loop[MAX_CORNERS + 1];
++	int ceiling[MAX_CORNERS + 1], floor[MAX_CORNERS + 1];
++	u32 last_corner;
++	u32 min_corner;			/* for the CCI, 0 if none */
++};
++
++static atomic_t cpr_clusters_done = ATOMIC_INIT(0);
++
++static u64 cpr_fuse_param(struct cpr_8992 *c, u32 row, u32 bit, u32 len)
++{
++	u64 v;
++
++	row += bit >> 6;
++	bit &= 63;
++	v = readq_relaxed(c->efuse + row * FUSE_ROW_BYTES) >> bit;
++	if (bit + len > 64)
++		v |= readq_relaxed(c->efuse + (row + 1) * FUSE_ROW_BYTES) << (64 - bit);
++	return len == 64 ? v : v & GENMASK_ULL(len - 1, 0);
++}
++
++static int cpr_read_u32s(struct cpr_8992 *c, const char *name, u32 *out,
++			 size_t n)
++{
++	int ret = of_property_read_u32_array(c->dev->of_node, name, out, n);
++
++	if (ret)
++		dev_err(c->dev, "%s: %d\n", name, ret);
++	return ret;
++}
++
++/* a <row bit len tz> fuse selector */
++static int cpr_read_sel(struct cpr_8992 *c, const char *name, u64 *val)
++{
++	u32 sel[4];
++	int ret = cpr_read_u32s(c, name, sel, 4);
++
++	if (!ret)
++		*val = cpr_fuse_param(c, sel[0], sel[1], sel[2]);
++	return ret;
++}
++
++static int cpr_read_fuses(struct cpr_8992 *c)
++{
++	struct device_node *np = c->dev->of_node;
++	u32 redun[5], row[2], bp[MAX_FUSE], *map;
++	int i, j, n, ret;
++	u64 v;
++
++	ret = cpr_read_u32s(c, "qcom,cpr-fuse-redun-sel", redun, 5);
++	if (ret)
++		return ret;
++	if (cpr_fuse_param(c, redun[0], redun[1], redun[2]) == redun[3]) {
++		dev_err(c->dev, "redundant fuse rows selected: not supported\n");
++		return -EOPNOTSUPP;
++	}
++
++	ret = cpr_read_sel(c, "qcom,cpr-fuse-revision", &v);
++	if (ret)
++		return ret;
++	c->revision = v;
++	ret = cpr_read_sel(c, "qcom,speed-bin-fuse-sel", &v);
++	if (ret)
++		return ret;
++	c->speed_bin = v;
++	c->pvs_version = 0;	/* no qcom,pvs-version-fuse-sel on 8992 */
++
++	ret = cpr_read_u32s(c, "qcom,cpr-fuse-row", row, 2) ?:
++	      cpr_read_u32s(c, "qcom,cpr-fuse-ro-sel", bp, c->nfc);
++	if (ret)
++		return ret;
++	for (i = 0; i < c->nfc; i++)
++		c->ro_sel[i] = cpr_fuse_param(c, row[0], bp[i], 3);
++
++	/* qcom,cpr-fuse-version-map: <speed_bin pvs_version revision ro_sel...> */
++	c->match = -1;
++	n = of_property_count_u32_elems(np, "qcom,cpr-fuse-version-map");
++	if (n > 0 && !(n % (c->nfc + 3))) {
++		map = kcalloc(n, sizeof(*map), GFP_KERNEL);
++		if (!map)
++			return -ENOMEM;
++		ret = cpr_read_u32s(c, "qcom,cpr-fuse-version-map", map, n);
++		for (i = 0; !ret && i < n / (c->nfc + 3); i++) {
++			u32 *t = map + i * (c->nfc + 3);
++
++			if ((t[0] != c->speed_bin && t[0] != MATCH_ANY) ||
++			    (t[1] != c->pvs_version && t[1] != MATCH_ANY) ||
++			    (t[2] != c->revision && t[2] != MATCH_ANY))
++				continue;
++			for (j = 0; j < c->nfc; j++)
++				if (t[3 + j] != c->ro_sel[j] && t[3 + j] != MATCH_ANY)
++					break;
++			if (j == c->nfc) {
++				c->match = i;
++				break;
++			}
++		}
++		kfree(map);
++		if (ret)
++			return ret;
++	}
++
++	dev_info(c->dev, "speed bin %u, fuse revision %u, version map tuple %d\n",
++		 c->speed_bin, c->revision, c->match);
++	return 0;
++}
++
++/* cpr_pvs_per_corner_init() + cpr_adjust_init_voltages() */
++static int cpr_fuse_corner_voltages(struct cpr_8992 *c)
++{
++	struct device_node *np = c->dev->of_node;
++	u32 sel[MAX_FUSE * 4], ref[MAX_FUSE], vstep, adj;
++	int i, ret;
++
++	ret = cpr_read_u32s(c, "qcom,cpr-fuse-init-voltage", sel, c->nfc * 4) ?:
++	      cpr_read_u32s(c, "qcom,cpr-init-voltage-ref", ref, c->nfc) ?:
++	      cpr_read_u32s(c, "qcom,cpr-init-voltage-step", &vstep, 1) ?:
++	      cpr_read_u32s(c, "qcom,cpr-voltage-ceiling", &c->fceil[1], c->nfc) ?:
++	      cpr_read_u32s(c, "qcom,cpr-voltage-floor", &c->ffloor[1], c->nfc);
++	if (ret)
++		return ret;
++
++	for (i = 1; i <= c->nfc; i++) {
++		u32 *s = &sel[(i - 1) * 4];
++		u64 bits = cpr_fuse_param(c, s[0], s[1], s[2]);
++		int sign = bits & BIT(s[2] - 1) ? -1 : 1;
++		int steps = bits & (BIT(s[2] - 1) - 1);
++		int v = ref[i - 1] + sign * steps * (int)vstep;
++
++		c->pvs[i] = DIV_ROUND_UP(v, c->step) * c->step;
++
++		if (c->match >= 0 &&
++		    !of_property_read_u32_index(np, "qcom,cpr-init-voltage-adjustment",
++						c->match * c->nfc + i - 1, &adj))
++			c->pvs[i] += (int)adj;
++
++		c->pvs[i] = clamp_t(int, c->pvs[i], c->ffloor[i], c->fceil[i]);
++		dev_dbg(c->dev, "fuse corner %d: %d uV\n", i, c->pvs[i]);
++	}
++	return 0;
++}
++
++/* qcom,cpr-voltage-{ceiling,floor}-override: <speed_bin pvs_version v1..vN> */
++static void cpr_override(struct cpr_8992 *c, const char *name, int *limit,
++			 const u32 *fuse_limit)
++{
++	struct device_node *np = c->dev->of_node;
++	int n = of_property_count_u32_elems(np, name);
++	int i, j, stride = c->nc + 2;
++	u32 b, p, v;
++
++	for (i = 0; n > 0 && !(n % stride) && i < n; i += stride) {
++		of_property_read_u32_index(np, name, i, &b);
++		of_property_read_u32_index(np, name, i + 1, &p);
++		if ((b != c->speed_bin && b != MATCH_ANY) ||
++		    (p != c->pvs_version && p != MATCH_ANY))
++			continue;
++		for (j = 1; j <= c->nc; j++) {
++			of_property_read_u32_index(np, name, i + 1 + j, &v);
++			limit[j] = v;
++		}
++		return;
++	}
++	for (j = 1; j <= c->nc; j++)
++		limit[j] = fuse_limit[c->corner_map[j]];
++}
++
++/* cpr_get_open_loop_voltage() and the limits applied after it */
++static int cpr_corner_voltages(struct cpr_8992 *c)
++{
++	struct device_node *np = c->dev->of_node;
++	u32 maxf[MAX_FUSE + 1] = { };
++	u32 *t;
++	int i, j, n, ret;
++
++	n = of_property_count_u32_elems(np, "qcom,cpr-corner-map");
++	if (n <= 0 || n > MAX_CORNERS)
++		return -EINVAL;
++	c->nc = n;
++	ret = cpr_read_u32s(c, "qcom,cpr-corner-map", &c->corner_map[1], n);
++	if (ret)
++		return ret;
++	for (i = 1; i <= c->nc; i++)
++		if (c->corner_map[i] < 1 || c->corner_map[i] > c->nfc)
++			return -EINVAL;
++
++	/* qcom,cpr-speed-bin-max-corners: <speed_bin pvs_version max1..maxN> */
++	n = of_property_count_u32_elems(np, "qcom,cpr-speed-bin-max-corners");
++	if (n <= 0 || n % (c->nfc + 2))
++		return -EINVAL;
++	t = kcalloc(n, sizeof(*t), GFP_KERNEL);
++	if (!t)
++		return -ENOMEM;
++	ret = cpr_read_u32s(c, "qcom,cpr-speed-bin-max-corners", t, n);
++	for (i = 0; !ret && i < n; i += c->nfc + 2) {
++		if ((t[i] == c->speed_bin || t[i] == MATCH_ANY) &&
++		    (t[i + 1] == c->pvs_version || t[i + 1] == MATCH_ANY)) {
++			memcpy(&c->corner_max[1], &t[i + 2], c->nfc * sizeof(u32));
++			break;
++		}
++	}
++	kfree(t);
++	if (ret)
++		return ret;
++	if (!c->corner_max[c->nfc]) {
++		dev_err(c->dev, "no qcom,cpr-speed-bin-max-corners for speed bin %u\n",
++			c->speed_bin);
++		return -EINVAL;
++	}
++	for (i = 1; i <= c->nfc; i++)
++		if (c->corner_max[i] < 1 || c->corner_max[i] > c->nc ||
++		    (i > 1 && c->corner_max[i] <= c->corner_max[i - 1]))
++			return -EINVAL;
++	c->last_corner = c->corner_max[c->nfc];
++
++	n = of_property_count_u32_elems(np, "qcom,cpr-corner-frequency-map");
++	if (n <= 0 || n % 2)
++		return -EINVAL;
++	for (i = 0; i < n; i += 2) {
++		u32 corner, hz;
++
++		of_property_read_u32_index(np, "qcom,cpr-corner-frequency-map", i, &corner);
++		of_property_read_u32_index(np, "qcom,cpr-corner-frequency-map", i + 1, &hz);
++		if (corner < 1 || corner > c->nc)
++			return -EINVAL;
++		c->freq[corner] = hz;
++	}
++
++	for (i = 1; i <= c->nc; i++)
++		c->open_loop[i] = c->pvs[c->corner_map[i]];
++
++	/* interpolate down within a fuse corner, at most scaling-factor-max uV/MHz */
++	if (!of_property_read_u32_array(np, "qcom,cpr-voltage-scaling-factor-max",
++					&maxf[1], c->nfc)) {
++		for (j = 2; j <= c->nfc; j++) {
++			u64 fh = c->freq[c->corner_max[j]];
++			u64 fl = c->freq[c->corner_max[j - 1]];
++			s64 vh = c->pvs[j], vl = c->pvs[j - 1];
++
++			if (fh <= fl || vh <= vl)
++				continue;
++			for (i = c->corner_max[j - 1] + 1; i < c->corner_max[j]; i++) {
++				u64 f = c->freq[i], lin, lim;
++
++				if (fh <= f)
++					continue;
++				lin = div64_u64((fh - f) * (vh - vl), fh - fl);
++				lim = div64_u64((fh - f) * maxf[j], 1000000);
++				c->open_loop[i] = vh - min(lin, lim);
++				c->open_loop[i] = DIV_ROUND_UP(c->open_loop[i], c->step) * c->step;
++			}
++		}
++	}
++
++	cpr_override(c, "qcom,cpr-voltage-ceiling-override", c->ceiling, c->fceil);
++	cpr_override(c, "qcom,cpr-voltage-floor-override", c->floor, c->ffloor);
++	for (i = 1; i <= c->nc; i++) {
++		if (c->floor[i] > c->ceiling[i])
++			return -EINVAL;
++		c->open_loop[i] = clamp(c->open_loop[i], c->floor[i], c->ceiling[i]);
++		if (of_property_read_bool(np, "qcom,cpr-scaled-init-voltage-as-ceiling"))
++			c->ceiling[i] = min(c->ceiling[i], c->open_loop[i]);
++	}
++	return 0;
++}
++
++/* put the voltages into the cluster's (shared) CPU OPP table */
++static int cpr_apply_opps(struct cpr_8992 *c, struct device *cpu_dev)
++{
++	unsigned long hz = 0;
++	struct dev_pm_opp *opp;
++	int i, ret, n = 0;
++
++	for (;;) {
++		opp = dev_pm_opp_find_freq_ceil(cpu_dev, &hz);
++		if (IS_ERR(opp))
++			break;
++		dev_pm_opp_put(opp);
++
++		for (i = 1; i <= c->nc; i++)
++			if (c->freq[i] == hz)
++				break;
++		if (i > c->nc || i > c->last_corner) {
++			dev_info(c->dev, "%lu Hz: no corner for this speed bin, disabled\n", hz);
++			ret = dev_pm_opp_disable(cpu_dev, hz);
++		} else {
++			int e = max_t(int, i, c->min_corner);
++
++			ret = dev_pm_opp_adjust_voltage(cpu_dev, hz, c->open_loop[e],
++							c->floor[e], c->ceiling[e]);
++			dev_info(c->dev, "%4lu MHz: corner %2d, %d uV (%d-%d)\n",
++				 hz / 1000000, e, c->open_loop[e], c->floor[e],
++				 c->ceiling[e]);
++			n++;
++		}
++		if (ret)
++			return ret;
++		hz++;
++	}
++	return n ? 0 : -ENODEV;
++}
++
++/* the corner the CCI's present rate needs (qcom,cci-corner-map: <Hz corner>) */
++static int cpr_cci_corner(struct cpr_8992 *c)
++{
++	struct device_node *np = c->dev->of_node;
++	const char *name = "qcom,cci-corner-map";
++	u32 hz, corner, top = 0;
++	unsigned long rate;
++	struct clk *clk;
++	int i, n;
++
++	n = of_property_count_u32_elems(np, name);
++	if (n <= 0)
++		return 0;
++	if (n % 2)
++		return -EINVAL;
++
++	clk = devm_clk_get(c->dev, "cci");
++	if (IS_ERR(clk))
++		return PTR_ERR(clk);
++	rate = clk_get_rate(clk);
++
++	for (i = 0; i < n; i += 2) {
++		of_property_read_u32_index(np, name, i, &hz);
++		of_property_read_u32_index(np, name, i + 1, &corner);
++		if (corner > c->nc)
++			return -EINVAL;
++		top = max(top, corner);
++		if (rate && rate <= hz && !c->min_corner)
++			c->min_corner = corner;
++	}
++	if (!c->min_corner)
++		c->min_corner = top;
++
++	dev_info(c->dev, "CCI at %lu Hz: rail corner at least %u\n", rate,
++		 c->min_corner);
++	return 0;
++}
++
++static const char * const cpr_genpd_names[] = { "mx", NULL };
++/* not "cpu": cpufreq-dt would then try to set up the regulator again */
++static const char * const cpr_regulator_names[] = { "vdd-apc", NULL };
++
++static int cpr_8992_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct device_node *np = dev->of_node;
++	struct device_node *cpu_np, *node;
++	struct resource *res;
++	struct cpr_8992 *c;
++	int ret, cpu, clusters;
++
++	c = devm_kzalloc(dev, sizeof(*c), GFP_KERNEL);
++	if (!c)
++		return -ENOMEM;
++	c->dev = dev;
++
++	/* QFPROM is also mapped by the nvmem driver: do not claim it */
++	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "efuse");
++	if (!res)
++		return -EINVAL;
++	c->efuse = devm_ioremap(dev, res->start, resource_size(res));
++	if (!c->efuse)
++		return -ENOMEM;
++
++	ret = cpr_read_u32s(c, "qcom,cpr-fuse-corners", &c->nfc, 1) ?:
++	      cpr_read_u32s(c, "qcom,cpr-apc-volt-step", &c->step, 1);
++	if (ret)
++		return ret;
++	if (!c->nfc || c->nfc > MAX_FUSE || !c->step)
++		return -EINVAL;
++
++	ret = cpr_read_fuses(c) ?: cpr_fuse_corner_voltages(c) ?:
++	      cpr_corner_voltages(c) ?: cpr_cci_corner(c);
++	if (ret)
++		return dev_err_probe(dev, ret, "cannot compute voltages\n");
++
++	/*
++	 * The cluster's CPUs share one OPP table (opp-shared): the rail, the MX
++	 * domain and the voltages are set up through the first CPU only, before
++	 * cpufreq-dt (which can no longer configure a table once it has OPPs).
++	 */
++	cpu_np = of_parse_phandle(np, "qcom,cpus", 0);
++	cpu = cpu_np ? of_cpu_node_to_id(cpu_np) : -ENODEV;
++	of_node_put(cpu_np);
++	if (cpu < 0)
++		return dev_err_probe(dev, -EINVAL, "no qcom,cpus\n");
++	{
++		struct device *cpu_dev = get_cpu_device(cpu);
++		struct device **virt_devs = NULL;
++		struct dev_pm_opp_config config = {
++			.regulator_names = cpr_regulator_names,
++			.genpd_names = cpr_genpd_names,
++			.virt_devs = &virt_devs,
++		};
++
++		if (!cpu_dev)
++			return -EPROBE_DEFER;
++
++		/* the rail (vdd-apc-supply), and MX through required-opps */
++		ret = devm_pm_opp_set_config(cpu_dev, &config);
++		if (ret)
++			return dev_err_probe(dev, ret, "CPU%d: rail/MX setup\n", cpu);
++		/* genpd only counts the MX votes of active devices */
++		if (virt_devs && virt_devs[0]) {
++			ret = pm_runtime_resume_and_get(virt_devs[0]);
++			if (ret)
++				return dev_err_probe(dev, ret, "CPU%d: MX domain\n", cpu);
++		}
++
++		ret = dev_pm_opp_of_add_table(cpu_dev);
++		if (ret)
++			return dev_err_probe(dev, ret, "CPU%d: OPP table\n", cpu);
++		ret = cpr_apply_opps(c, cpu_dev);
++		if (ret)
++			return dev_err_probe(dev, ret, "CPU%d: voltages\n", cpu);
++	}
++
++	/* cpufreq-dt once every cluster has its voltages */
++	clusters = 0;
++	for_each_compatible_node(node, NULL, "qcom,msm8992-cpr")
++		if (of_device_is_available(node))
++			clusters++;
++	if (atomic_inc_return(&cpr_clusters_done) == clusters)
++		platform_device_register_simple("cpufreq-dt", -1, NULL, 0);
++
++	return 0;
++}
++
++static const struct of_device_id cpr_8992_match[] = {
++	{ .compatible = "qcom,msm8992-cpr" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, cpr_8992_match);
++
++static struct platform_driver cpr_8992_driver = {
++	.probe = cpr_8992_probe,
++	.driver = {
++		.name = "qcom-cpr-8992",
++		.of_match_table = cpr_8992_match,
++		.suppress_bind_attrs = true,
++	},
++};
++module_platform_driver(cpr_8992_driver);
++
++MODULE_DESCRIPTION("MSM8992 CPR open-loop CPU voltages");
++MODULE_LICENSE("GPL");

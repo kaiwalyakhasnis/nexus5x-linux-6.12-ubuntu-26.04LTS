@@ -1,0 +1,116 @@
+// SPDX-License-Identifier: GPL-2.0-only
+#include <dt-bindings/thermal/thermal.h>
+
+/*
+ * CPU frequency and voltage scaling.
+ *
+ * Rails (3.10 msm8992-regulator.dtsi): apc0_vreg_corner (A53) runs on pm8994
+ * S8, apc1_vreg_corner (A57) on S11 (S9/S10 are extra phases). They may move
+ * between the lowest stock floor and the highest stock ceiling; the CPR
+ * driver (bullhead-cpr.dtsi) gives each frequency its fused open-loop value
+ * inside that frequency's own floor and ceiling. The rails must never turn
+ * off.
+ */
+&pm8994_spmi_regulators {
+	vreg_apc0: s8 {
+		regulator-name = "vdd_apc0";
+		regulator-min-microvolt = <640000>;
+		regulator-max-microvolt = <1180000>;
+		regulator-always-on;
+	};
+
+	vreg_apc1: s11 {
+		regulator-name = "vdd_apc1";
+		regulator-min-microvolt = <640000>;
+		regulator-max-microvolt = <1180000>;
+		regulator-always-on;
+	};
+};
+
+/*
+ * Cluster clocks (kernel patch "clk: qcom: add MSM8992 CPU cluster clocks"):
+ * PLL0 of each cluster (3.10 c0_pll/c1_pll), the cluster mux in the GLB
+ * blocks (3.10 c0_mux/c1_mux, +0x54), and the CCI PLL for the read-only CCI
+ * clock (index 2).
+ */
+&soc {
+	cpu_clk: clock-controller@f9015000 {
+		compatible = "qcom,msm8992-cpu-clk";
+		reg = <0xf9015000 0x100>,	/* A53 PLL0 */
+		      <0xf9016000 0x100>,	/* A57 PLL0 */
+		      <0xf900d054 0x4>,		/* A53 mux */
+		      <0xf900f054 0x4>,		/* A57 mux */
+		      <0xf9011000 0x100>;	/* CCI PLL (the CCI mux is read via SCM) */
+		#clock-cells = <1>;
+	};
+};
+
+/*
+ * MX: the stock CPR votes vdd-mx (pm8994_s2_corner_ao) per fuse corner
+ * (qcom,vdd-mx-corner-map); here the OPPs' required-opps do, through the
+ * active-only MX domain of the RPM.
+ */
+#define BULLHEAD_CPU(_cpu, _cl, _supply)				\
+	&_cpu {								\
+		clocks = <&cpu_clk _cl>;				\
+		operating-points-v2 = <&cluster##_cl##_opp>;		\
+		vdd-apc-supply = <&_supply>;			\
+		power-domains = <&rpmpd MSM8994_VDDMX_AO>;		\
+		power-domain-names = "mx";				\
+		#cooling-cells = <2>;					\
+	}
+
+BULLHEAD_CPU(CPU0, 0, vreg_apc0);
+BULLHEAD_CPU(CPU1, 0, vreg_apc0);
+BULLHEAD_CPU(CPU2, 0, vreg_apc0);
+BULLHEAD_CPU(CPU3, 0, vreg_apc0);
+BULLHEAD_CPU(CPU4, 1, vreg_apc1);
+BULLHEAD_CPU(CPU5, 1, vreg_apc1);
+
+/*
+ * Stock throttling, from the 3.10 qcom,msm-thermal node:
+ * - qcom,limit-temp = <60>, hysteresis 10, sensor 7, freq-control-mask 0x3f:
+ *   all CPUs step down from 60 degC.
+ * - qcom,freq-mitigation-temp = <100>, hysteresis 20, mask 0x30: the A57s
+ *   are capped at 768 MHz from 100 degC (cooling state 9 of the A57 table:
+ *   1824, 1689.6, 1632, 1536, 1440, 1344, 1248, 960, 864, 768).
+ * Not done: core control (CPU1-5 offline from 80 degC) and hotplug at
+ * 105 degC; mainline has no thermal hotplug.
+ */
+&{/thermal-zones/cpu0-1-thermal} {
+	trips {
+		cpu_limit: limit {
+			temperature = <60000>;
+			hysteresis = <10000>;
+			type = "passive";
+		};
+	};
+
+	cooling-maps {
+		map0 {
+			trip = <&cpu_limit>;
+			cooling-device = <&CPU0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+					 <&CPU4 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+		};
+	};
+};
+
+#define BULLHEAD_A57_MITIGATION(_zone, _label)				\
+	&{/thermal-zones/_zone} {					\
+		trips {							\
+			_label: mitigation {				\
+				temperature = <100000>;			\
+				hysteresis = <20000>;			\
+				type = "passive";			\
+			};						\
+		};							\
+		cooling-maps {						\
+			map0 {						\
+				trip = <&_label>;			\
+				cooling-device = <&CPU4 9 9>;		\
+			};						\
+		};							\
+	}
+
+BULLHEAD_A57_MITIGATION(cpu4-thermal, cpu4_mitigation);
+BULLHEAD_A57_MITIGATION(cpu5-thermal, cpu5_mitigation);

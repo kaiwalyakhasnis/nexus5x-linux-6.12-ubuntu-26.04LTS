@@ -1,0 +1,495 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bullhead-linux <kaiwalyakhasnis57@gmail.com>
+Date: Sat, 31 Oct 2026 12:36:32 +0900
+Subject: [PATCH 11/12] clk: qcom: add MSM8992 CPU cluster clocks
+
+The A53 and A57 cluster clocks of MSM8992, after the 3.10 kernel's
+clock-cpu-8994.c (8994 v2 / 8992 tree) and the variable-rate PLL code in
+clock-pll.c, cut down to what cpufreq needs: PLL0 of each cluster with its
+post divider (2 or 4) through the LF mux, and GPLL0 (600 MHz) as the source
+the cluster is parked on while PLL0 is reprogrammed. The alternate PLL and
+the PLL's direct output are not used.
+
+Rates are the stock speed-bin 0 ones whose CPR ceiling fits the 1.0 V the
+bootloader leaves on the rails; there is no CPR driver.
+---
+ drivers/clk/qcom/Kconfig        |   8 +
+ drivers/clk/qcom/Makefile       |   1 +
+ drivers/clk/qcom/clk-cpu-8992.c | 437 ++++++++++++++++++++++++++++++++
+ 3 files changed, 446 insertions(+)
+ create mode 100644 drivers/clk/qcom/clk-cpu-8992.c
+
+diff --git a/drivers/clk/qcom/Kconfig b/drivers/clk/qcom/Kconfig
+index fd605bccf..ead21256f 100644
+--- a/drivers/clk/qcom/Kconfig
++++ b/drivers/clk/qcom/Kconfig
+@@ -108,6 +108,14 @@ config QCOM_CLK_APCC_MSM8996
+ 	  Say Y if you want to support CPU clock scaling using CPUfreq
+ 	  drivers for dynamic power management.
+ 
++config QCOM_CLK_CPU_8992
++	tristate "MSM8992 CPU cluster clocks"
++	depends on ARM64 || COMPILE_TEST
++	help
++	  Support for the A53 and A57 cluster clocks on MSM8992, so CPUfreq
++	  can scale them. Rates are limited to what the rail voltage the
++	  bootloader leaves supports; there is no CPR driver.
++
+ config QCOM_CLK_APCS_SDX55
+ 	tristate "SDX55 and SDX65 APCS Clock Controller"
+ 	depends on QCOM_APCS_IPC || COMPILE_TEST
+diff --git a/drivers/clk/qcom/Makefile b/drivers/clk/qcom/Makefile
+index 2b378667a..e21e6871a 100644
+--- a/drivers/clk/qcom/Makefile
++++ b/drivers/clk/qcom/Makefile
+@@ -63,6 +63,7 @@ obj-$(CONFIG_QCOM_A53PLL) += a53-pll.o
+ obj-$(CONFIG_QCOM_A7PLL) += a7-pll.o
+ obj-$(CONFIG_QCOM_CLK_APCS_MSM8916) += apcs-msm8916.o
+ obj-$(CONFIG_QCOM_CLK_APCC_MSM8996) += apcs-msm8996.o clk-cpu-8996.o clk-cbf-8996.o
++obj-$(CONFIG_QCOM_CLK_CPU_8992) += clk-cpu-8992.o
+ obj-$(CONFIG_QCOM_CLK_APCS_SDX55) += apcs-sdx55.o
+ obj-$(CONFIG_QCOM_CLK_RPM) += clk-rpm.o
+ obj-$(CONFIG_QCOM_CLK_RPMH) += clk-rpmh.o
+diff --git a/drivers/clk/qcom/clk-cpu-8992.c b/drivers/clk/qcom/clk-cpu-8992.c
+new file mode 100644
+index 000000000..e1106bfed
+--- /dev/null
++++ b/drivers/clk/qcom/clk-cpu-8992.c
+@@ -0,0 +1,437 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * MSM8992 CPU cluster clocks (A53 cluster 0, A57 cluster 1), after the 3.10
++ * kernel's clock-cpu-8994.c (8994 v2 / 8992 tree) and clock-pll.c
++ * (variable_rate_pll_*), cut down to what cpufreq needs:
++ *
++ *   PLL0 (L x 19.2 MHz, 1209.6-1996.8 MHz) -----------------> HF mux sel 3
++ *   PLL0 --[post div 2/4]--> LF mux sel 2
++ *   GPLL0 (sys_apcsaux, 600 MHz) --> LF mux sel 3
++ *   LF mux --> HF mux sel 0;  HF mux --> cluster
++ *
++ * The LF mux is bits 2:1 and the HF mux bits 4:3 of the cluster's GLB
++ * register at +0x54. A rate change parks the cluster on GPLL0, reprograms
++ * PLL0 while it is off (the post divider may only change then), relocks it
++ * with the 3.10 enable sequence and switches back. PLL1 (the alternate PLL
++ * 3.10 ping-pongs with) is not used.
++ *
++ * Voltage is not handled here: cpufreq-dt sets it from the OPP table (the
++ * CPR driver fills in the voltages) before raising the clock.
++ *
++ * The CCI clock (index 2) is read-only: it stays where the bootloader left
++ * it, and the CPR driver keeps the A53 rail high enough for it. Its mux and
++ * divider live in a secure register that 3.10 also only reads through SCM
++ * (0xf911211c: LF mux bits 2:1, HF mux bits 4:3, divider - 1 in bits 6:5);
++ * its alpha PLL is plain MMIO.
++ */
++
++#include <linux/bitfield.h>
++#include <linux/clk-provider.h>
++#include <linux/delay.h>
++#include <linux/firmware/qcom/qcom_scm.h>
++#include <linux/io.h>
++#include <linux/iopoll.h>
++#include <linux/math64.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++
++#define PLL_MODE		0x00
++#define PLL_L_VAL		0x04
++#define PLL_ALPHA		0x08
++#define PLL_USER_CTL		0x10
++#define PLL_CONFIG_CTL		0x14
++#define PLL_TEST_CTL_LO		0x20
++
++#define PLL_OUTCTRL		BIT(0)
++#define PLL_BYPASSNL		BIT(1)
++#define PLL_RESET_N		BIT(2)
++#define PLL_TEST_EN		BIT(3)
++#define PLL_APC_PDN		BIT(24)
++#define PLL_LOCK		BIT(31)
++
++#define USER_MAIN_OUT		BIT(0)
++#define USER_EARLY_OUT		BIT(3)
++#define USER_POST_DIV		GENMASK(9, 8)
++#define USER_PRE_DIV		BIT(12)
++#define USER_MN_EN		BIT(24)
++
++#define PLL_CONFIG_CTL_VAL	0x000d6968
++#define PLL_TEST_CTL_LO_VAL	0x00010000
++
++#define MUX_SEL			GENMASK(4, 1)
++#define MUX_LF_PLL0_DIV		(2 << 1)
++#define MUX_LF_GPLL0		(3 << 1)
++#define MUX_HF_PLL0		((3 << 3) | MUX_LF_GPLL0)
++
++#define CCI_MUX_PHYS		0xf911211c
++#define ALPHA_PLL_ALPHA_U	0x0c
++#define ALPHA_PLL_ALPHA_EN	BIT(24)
++#define ALPHA_PLL_POST_DIV	GENMASK(11, 8)
++
++#define XO_RATE			19200000UL
++#define GPLL0_RATE		600000000UL
++#define PLL_MIN_RATE		1209600000UL
++#define PLL_MAX_RATE		1996800000UL
++
++struct cpu_clk_8992 {
++	struct clk_hw hw;
++	void __iomem *pll;
++	void __iomem *mux;
++	const unsigned long *rates;
++	bool pll_inited;
++};
++
++#define to_cpu_clk(_hw) container_of(_hw, struct cpu_clk_8992, hw)
++
++/* The 3.10 qcom,a53-speedbin1-v0 and qcom,a57-speedbin0-v0 rates */
++static const unsigned long a53_rates[] = {
++	384000000, 460800000, 600000000, 672000000, 787200000,
++	864000000, 960000000, 1248000000, 1440000000, 0
++};
++
++static const unsigned long a57_rates[] = {
++	384000000, 480000000, 633600000, 768000000, 864000000,
++	960000000, 1248000000, 1344000000, 1440000000, 1536000000,
++	1632000000, 1689600000, 1824000000, 0
++};
++
++static void cpu_clk_set_mux(struct cpu_clk_8992 *c, u32 sel)
++{
++	u32 val = readl_relaxed(c->mux);
++
++	val &= ~MUX_SEL;
++	val |= sel;
++	writel_relaxed(val, c->mux);
++	/* switch request through, then the hardware-mandated delay */
++	mb();
++	udelay(5);
++}
++
++static unsigned int cpu_clk_post_div(u32 user)
++{
++	switch (FIELD_GET(USER_POST_DIV, user)) {
++	case 0:
++		return 1;
++	case 1:
++		return 2;
++	default:
++		return 4;
++	}
++}
++
++/* PLL0 rate and post divider (1: the HF mux takes PLL0 directly) */
++static int cpu_clk_pll_setting(unsigned long rate, u32 *l, unsigned int *div)
++{
++	for (*div = 1; *div <= 4; *div *= 2) {
++		unsigned long pll = rate * *div;
++
++		if (pll >= PLL_MIN_RATE && pll <= PLL_MAX_RATE &&
++		    !(pll % XO_RATE)) {
++			*l = pll / XO_RATE;
++			return 0;
++		}
++	}
++	return -EINVAL;
++}
++
++static unsigned long cpu_clk_recalc_rate(struct clk_hw *hw,
++					 unsigned long parent_rate)
++{
++	struct cpu_clk_8992 *c = to_cpu_clk(hw);
++	u32 sel = readl_relaxed(c->mux) & MUX_SEL;
++	u32 l = readl_relaxed(c->pll + PLL_L_VAL) & 0xff;
++	u32 user = readl_relaxed(c->pll + PLL_USER_CTL);
++
++	if ((sel & GENMASK(4, 3)) == (3 << 3))
++		return l * XO_RATE;
++
++	switch (sel) {
++	case MUX_LF_GPLL0:
++		return GPLL0_RATE;
++	case MUX_LF_PLL0_DIV:
++		return l * XO_RATE / cpu_clk_post_div(user);
++	case 0:
++		return XO_RATE;
++	default:
++		/* PLL1, or PLL0 early output: not set up by this driver */
++		return 0;
++	}
++}
++
++static int cpu_clk_determine_rate(struct clk_hw *hw,
++				  struct clk_rate_request *req)
++{
++	struct cpu_clk_8992 *c = to_cpu_clk(hw);
++	unsigned long best = 0;
++	int i;
++
++	/* the highest table rate not above the request, else the lowest */
++	for (i = 0; c->rates[i]; i++) {
++		if (c->rates[i] <= req->rate && c->rates[i] > best)
++			best = c->rates[i];
++	}
++	if (!best)
++		best = c->rates[0];
++
++	req->rate = best;
++	return 0;
++}
++
++/* clock-pll.c __variable_rate_pll_init(), once for PLLs LK left untouched */
++static void cpu_clk_pll_init(struct cpu_clk_8992 *c)
++{
++	u32 val;
++
++	val = readl_relaxed(c->pll + PLL_USER_CTL);
++	val &= ~(USER_PRE_DIV | USER_MN_EN);
++	val |= USER_MAIN_OUT | USER_EARLY_OUT;
++	writel_relaxed(val, c->pll + PLL_USER_CTL);
++
++	val = readl_relaxed(c->pll + PLL_MODE);
++	val &= ~PLL_APC_PDN;
++	writel_relaxed(val, c->pll + PLL_MODE);
++
++	writel_relaxed(0, c->pll + PLL_ALPHA);
++	writel_relaxed(PLL_CONFIG_CTL_VAL, c->pll + PLL_CONFIG_CTL);
++	c->pll_inited = true;
++}
++
++/* clock-pll.c variable_rate_pll_clk_enable() */
++static int cpu_clk_pll_enable(struct cpu_clk_8992 *c)
++{
++	u32 mode, testlo;
++	int ret;
++
++	mode = readl_relaxed(c->pll + PLL_MODE);
++	writel_relaxed(PLL_TEST_CTL_LO_VAL, c->pll + PLL_TEST_CTL_LO);
++
++	mode |= PLL_TEST_EN;
++	writel_relaxed(mode, c->pll + PLL_MODE);
++	testlo = readl_relaxed(c->pll + PLL_TEST_CTL_LO);
++	testlo &= ~GENMASK(7, 6);
++	testlo |= 0xc0;
++	writel_relaxed(testlo, c->pll + PLL_TEST_CTL_LO);
++	mb();
++
++	mode |= PLL_BYPASSNL;
++	writel_relaxed(mode, c->pll + PLL_MODE);
++	/* 5 us between bypass and reset; 3.10 uses 10 */
++	mb();
++	udelay(10);
++
++	mode |= PLL_RESET_N;
++	writel_relaxed(mode, c->pll + PLL_MODE);
++	/* past the early "transient" locks seen about 16 us in */
++	mb();
++	udelay(200);
++
++	writel_relaxed(0, c->pll + PLL_TEST_CTL_LO);
++
++	ret = readl_relaxed_poll_timeout_atomic(c->pll + PLL_MODE, mode,
++						mode & PLL_LOCK, 1, 500);
++	if (ret)
++		return ret;
++
++	mode |= PLL_OUTCTRL;
++	writel_relaxed(mode, c->pll + PLL_MODE);
++	mb();
++	return 0;
++}
++
++static int cpu_clk_set_rate(struct clk_hw *hw, unsigned long rate,
++			    unsigned long parent_rate)
++{
++	struct cpu_clk_8992 *c = to_cpu_clk(hw);
++	unsigned int div;
++	u32 l, user;
++	int ret;
++
++	/* park on GPLL0: always running, and fine at any table voltage */
++	cpu_clk_set_mux(c, MUX_LF_GPLL0);
++	if (rate == GPLL0_RATE)
++		return 0;
++
++	ret = cpu_clk_pll_setting(rate, &l, &div);
++	if (ret)
++		return ret;
++
++	writel_relaxed(0, c->pll + PLL_MODE);
++	mb();
++	if (!c->pll_inited)
++		cpu_clk_pll_init(c);
++
++	user = readl_relaxed(c->pll + PLL_USER_CTL);
++	user &= ~USER_POST_DIV;
++	user |= FIELD_PREP(USER_POST_DIV, div == 4 ? 3 : 1);
++	writel_relaxed(user, c->pll + PLL_USER_CTL);
++	writel_relaxed(l, c->pll + PLL_L_VAL);
++	mb();
++
++	ret = cpu_clk_pll_enable(c);
++	if (ret) {
++		pr_err("%s: PLL did not lock at L %u, staying on GPLL0\n",
++		       clk_hw_get_name(hw), l);
++		return ret;
++	}
++
++	cpu_clk_set_mux(c, div == 1 ? MUX_HF_PLL0 : MUX_LF_PLL0_DIV);
++	return 0;
++}
++
++struct cci_clk_8992 {
++	struct clk_hw hw;
++	void __iomem *pll;
++};
++
++/* 20nm alpha PLL (3.10 cci_pll): L + alpha / 2^40, post divider 1/2/4/8 */
++static unsigned long cci_pll_rate(void __iomem *pll, bool main_out)
++{
++	u32 mode = readl_relaxed(pll + PLL_MODE);
++	u32 user = readl_relaxed(pll + PLL_USER_CTL);
++	u64 rate = (u64)(readl_relaxed(pll + PLL_L_VAL) & 0xff) * XO_RATE;
++
++	if (!(mode & PLL_LOCK))
++		return 0;
++	if (user & ALPHA_PLL_ALPHA_EN) {
++		u64 alpha = readl_relaxed(pll + PLL_ALPHA) |
++			    (u64)(readl_relaxed(pll + ALPHA_PLL_ALPHA_U) & 0xff) << 32;
++
++		rate += mul_u64_u64_div_u64(alpha, XO_RATE, 1ULL << 40);
++	}
++	if (main_out)
++		rate >>= fls(FIELD_GET(ALPHA_PLL_POST_DIV, user));
++	return rate;
++}
++
++static unsigned long cci_clk_recalc_rate(struct clk_hw *hw,
++					 unsigned long parent_rate)
++{
++	struct cci_clk_8992 *c = container_of(hw, struct cci_clk_8992, hw);
++	unsigned long rate;
++	u32 v;
++
++	if (qcom_scm_io_readl(CCI_MUX_PHYS, &v))
++		return 0;
++
++	switch ((v >> 3) & 3) {
++	case 1:		/* LF mux */
++		rate = ((v >> 1) & 3) == 1 ? GPLL0_RATE : XO_RATE;
++		break;
++	case 2:
++		rate = cci_pll_rate(c->pll, true);
++		break;
++	case 3:
++		rate = cci_pll_rate(c->pll, false);
++		break;
++	default:
++		return 0;
++	}
++	return rate / (((v >> 5) & 3) + 1);
++}
++
++static const struct clk_ops cci_clk_ops = {
++	.recalc_rate = cci_clk_recalc_rate,
++};
++
++static const struct clk_ops cpu_clk_ops = {
++	.recalc_rate = cpu_clk_recalc_rate,
++	.determine_rate = cpu_clk_determine_rate,
++	.set_rate = cpu_clk_set_rate,
++};
++
++static int cpu_clk_8992_probe(struct platform_device *pdev)
++{
++	static const char * const names[] = { "a53_clk", "a57_clk" };
++	static const unsigned long * const rates[] = { a53_rates, a57_rates };
++	struct device *dev = &pdev->dev;
++	struct clk_hw_onecell_data *data;
++	int i, ret;
++
++	/* the CCI mux is only readable through SCM */
++	if (!qcom_scm_is_available())
++		return -EPROBE_DEFER;
++
++	data = devm_kzalloc(dev, struct_size(data, hws, 3), GFP_KERNEL);
++	if (!data)
++		return -ENOMEM;
++	data->num = 3;
++
++	for (i = 0; i < 2; i++) {
++		struct clk_init_data init = {
++			.name = names[i],
++			.ops = &cpu_clk_ops,
++			.flags = CLK_GET_RATE_NOCACHE | CLK_IS_CRITICAL,
++		};
++		struct cpu_clk_8992 *c;
++		struct resource *res;
++
++		c = devm_kzalloc(dev, sizeof(*c), GFP_KERNEL);
++		if (!c)
++			return -ENOMEM;
++
++		/* the mux registers sit inside the APCS mailbox's range */
++		res = platform_get_resource(pdev, IORESOURCE_MEM, i);
++		c->pll = res ? devm_ioremap(dev, res->start, resource_size(res)) : NULL;
++		res = platform_get_resource(pdev, IORESOURCE_MEM, i + 2);
++		c->mux = res ? devm_ioremap(dev, res->start, resource_size(res)) : NULL;
++		if (!c->pll || !c->mux)
++			return -ENOMEM;
++
++		/* LK runs the A53 PLL; the A57 PLLs are off until we set them up */
++		c->pll_inited = i == 0 && (readl_relaxed(c->pll + PLL_MODE) & PLL_LOCK);
++		c->rates = rates[i];
++		c->hw.init = &init;
++
++		ret = devm_clk_hw_register(dev, &c->hw);
++		if (ret)
++			return ret;
++		data->hws[i] = &c->hw;
++
++		dev_info(dev, "%s at %lu Hz\n", names[i], clk_hw_get_rate(&c->hw));
++	}
++
++	{
++		struct clk_init_data init = {
++			.name = "cci_clk",
++			.ops = &cci_clk_ops,
++			.flags = CLK_GET_RATE_NOCACHE,
++		};
++		struct cci_clk_8992 *cci;
++		struct resource *res;
++
++		cci = devm_kzalloc(dev, sizeof(*cci), GFP_KERNEL);
++		if (!cci)
++			return -ENOMEM;
++		res = platform_get_resource(pdev, IORESOURCE_MEM, 4);
++		cci->pll = res ? devm_ioremap(dev, res->start, resource_size(res)) : NULL;
++		if (!cci->pll)
++			return -ENOMEM;
++		cci->hw.init = &init;
++		ret = devm_clk_hw_register(dev, &cci->hw);
++		if (ret)
++			return ret;
++		data->hws[2] = &cci->hw;
++		dev_info(dev, "cci_clk at %lu Hz\n", clk_hw_get_rate(&cci->hw));
++	}
++
++	return devm_of_clk_add_hw_provider(dev, of_clk_hw_onecell_get, data);
++}
++
++static const struct of_device_id cpu_clk_8992_match[] = {
++	{ .compatible = "qcom,msm8992-cpu-clk" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, cpu_clk_8992_match);
++
++static struct platform_driver cpu_clk_8992_driver = {
++	.probe = cpu_clk_8992_probe,
++	.driver = {
++		.name = "qcom-cpu-clk-8992",
++		.of_match_table = cpu_clk_8992_match,
++	},
++};
++module_platform_driver(cpu_clk_8992_driver);
++
++MODULE_DESCRIPTION("MSM8992 CPU cluster clocks");
++MODULE_LICENSE("GPL");

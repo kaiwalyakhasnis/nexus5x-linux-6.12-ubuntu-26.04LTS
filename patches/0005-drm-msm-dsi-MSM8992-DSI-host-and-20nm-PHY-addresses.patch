@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: bullhead-linux <kaiwalyakhasnis57@gmail.com>
 Date: Sat, 31 Oct 2026 06:54:57 +0900
-Subject: [PATCH 05/10] drm/msm/dsi: MSM8992 DSI host and 20nm PHY addresses
+Subject: [PATCH 05/12] drm/msm/dsi: MSM8992 DSI host and 20nm PHY addresses
 
 The MSM8992 has the MSM8994's DSI 6G v1.3 host and 20nm PHY, but at
 0xfd994000/0xfd996000 (3.10 msm8992-mdss.dtsi). The host config picks its
