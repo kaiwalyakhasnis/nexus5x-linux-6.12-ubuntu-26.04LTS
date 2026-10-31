@@ -1,0 +1,8 @@
+# busybox init: <tty>::<action>:<command>  (see busybox/examples/inittab)
+::sysinit:/etc/init.d/rcS
+# QEMU: interactive shell on the serial port
+::respawn:/usr/share/learn/serial-shell.sh
+# Phone: no keyboard, so the panel shows a live status screen instead
+tty1::respawn:/usr/share/learn/status.sh
+::ctrlaltdel:/sbin/reboot
+::shutdown:/bin/umount -a -r

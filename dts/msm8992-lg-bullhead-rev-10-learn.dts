@@ -1,0 +1,11 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * bullhead-linux: mainline msm8992-lg-bullhead + a simple-framebuffer so the
+ * console shows up on the panel the bootloader (LK) already switched on.
+ * Copied into the *downloaded* mainline tree at build time; nothing here
+ * touches the LineageOS kernel.
+ */
+#include "msm8992-lg-bullhead-rev-10.dts"
+#include "bullhead-learn.dtsi"
+#include "bullhead-smp.dtsi"
+#include "bullhead-display.dtsi"

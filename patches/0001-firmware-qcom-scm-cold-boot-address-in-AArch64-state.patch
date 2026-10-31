@@ -1,0 +1,51 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bullhead-linux <kaiwalyakhasnis57@gmail.com>
+Date: Sat, 31 Oct 2026 06:53:29 +0900
+Subject: [PATCH 1/7] firmware: qcom: scm: cold boot address in AArch64 state
+
+From oneplus2-mainline (github.com/luvingiane/oneplus2-mainline, patch 0009,
+GPL-2.0). MSM8992/MSM8994 firmware has no PSCI; without the AArch64 flag in
+the multi-cluster call TrustZone starts the secondary cores in AArch32.
+---
+ drivers/firmware/qcom/qcom_scm.c       | 15 +++++++++++++++
+ include/linux/firmware/qcom/qcom_scm.h |  1 +
+ 2 files changed, 16 insertions(+)
+
+diff --git a/drivers/firmware/qcom/qcom_scm.c b/drivers/firmware/qcom/qcom_scm.c
+index f8b5650ea..f79b167c3 100644
+--- a/drivers/firmware/qcom/qcom_scm.c
++++ b/drivers/firmware/qcom/qcom_scm.c
+@@ -455,6 +455,21 @@ int qcom_scm_set_cold_boot_addr(void *entry)
+ }
+ EXPORT_SYMBOL_GPL(qcom_scm_set_cold_boot_addr);
+ 
++/**
++ * qcom_scm_set_cold_boot_addr_aarch64() - Set the cold boot address for all
++ * cpus, to be entered in AArch64 state (multi-cluster call only)
++ * @entry: Entry point function for the cpus
++ *
++ * For arm64 kernels on firmware without PSCI (MSM8994): without the AArch64
++ * flag the secondary cores start in AArch32 state.
++ */
++int qcom_scm_set_cold_boot_addr_aarch64(void *entry)
++{
++	return qcom_scm_set_boot_addr_mc(entry, QCOM_SCM_BOOT_MC_FLAG_COLDBOOT |
++					 QCOM_SCM_BOOT_MC_FLAG_AARCH64);
++}
++EXPORT_SYMBOL_GPL(qcom_scm_set_cold_boot_addr_aarch64);
++
+ /**
+  * qcom_scm_cpu_power_down() - Power down the cpu
+  * @flags:	Flags to flush cache
+diff --git a/include/linux/firmware/qcom/qcom_scm.h b/include/linux/firmware/qcom/qcom_scm.h
+index 6f9862033..428c05a3d 100644
+--- a/include/linux/firmware/qcom/qcom_scm.h
++++ b/include/linux/firmware/qcom/qcom_scm.h
+@@ -62,6 +62,7 @@ enum qcom_scm_ice_cipher {
+ bool qcom_scm_is_available(void);
+ 
+ int qcom_scm_set_cold_boot_addr(void *entry);
++int qcom_scm_set_cold_boot_addr_aarch64(void *entry);
+ int qcom_scm_set_warm_boot_addr(void *entry);
+ void qcom_scm_cpu_power_down(u32 flags);
+ int qcom_scm_set_remote_state(u32 state, u32 id);

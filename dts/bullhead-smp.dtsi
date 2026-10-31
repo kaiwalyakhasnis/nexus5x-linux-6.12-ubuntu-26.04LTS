@@ -1,0 +1,45 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * Secondary A53 cores (cpu1-3) through the firmware's ACC method; the
+ * bullhead firmware has no PSCI (mainline already deletes the psci node).
+ * The ACC power-control blocks are the second reg of acc1..acc3 in the 3.10
+ * qcom/msm8992.dtsi (0xf909b000 + 0x10000 * n). Needs kernel patch
+ * "arm64: smp: qcom,8994-arm-cortex-acc enable method".
+ *
+ * The A57 cores (CPU4, CPU5) keep mainline's enable-method = "psci", which
+ * this firmware lacks, so they stay off: without a cluster clock driver their
+ * PLL is not programmed (they would run at the 19.2 MHz reference clock) and
+ * there is no thermal driver to throttle them.
+ */
+&soc {
+	acc1: power-controller@f909b000 {
+		compatible = "qcom,msm8994-cpu-acc";
+		reg = <0xf909b000 0x1000>;
+	};
+
+	acc2: power-controller@f90ab000 {
+		compatible = "qcom,msm8994-cpu-acc";
+		reg = <0xf90ab000 0x1000>;
+	};
+
+	acc3: power-controller@f90bb000 {
+		compatible = "qcom,msm8994-cpu-acc";
+		reg = <0xf90bb000 0x1000>;
+	};
+};
+
+&CPU1 {
+	enable-method = "qcom,8994-arm-cortex-acc";
+	qcom,acc = <&acc1>;
+};
+
+&CPU2 {
+	enable-method = "qcom,8994-arm-cortex-acc";
+	qcom,acc = <&acc2>;
+};
+
+&CPU3 {
+	enable-method = "qcom,8994-arm-cortex-acc";
+	qcom,acc = <&acc3>;
+};
+

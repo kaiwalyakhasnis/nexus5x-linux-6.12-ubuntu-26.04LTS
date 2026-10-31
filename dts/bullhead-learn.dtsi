@@ -1,0 +1,35 @@
+// SPDX-License-Identifier: GPL-2.0-only
+#include <dt-bindings/clock/qcom,mmcc-msm8994.h>
+
+/ {
+	chosen {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		/* LK leaves the splash screen running here (cont_splash_mem). */
+		framebuffer0: framebuffer@3400000 {
+			compatible = "simple-framebuffer";
+			reg = <0 0x3400000 0 (1080 * 1920 * 3)>;
+			width = <1080>;
+			height = <1920>;
+			stride = <(1080 * 3)>;
+			format = "r8g8b8";
+			/* keep the display pipeline alive: there is no panel driver */
+			clocks = <&mmcc MDSS_AHB_CLK>,
+				 <&mmcc MDSS_AXI_CLK>,
+				 <&mmcc MDSS_VSYNC_CLK>,
+				 <&mmcc MDSS_MDP_CLK>,
+				 <&mmcc MDSS_BYTE0_CLK>,
+				 <&mmcc MDSS_PCLK0_CLK>,
+				 <&mmcc MDSS_ESC0_CLK>;
+			power-domains = <&mmcc MDSS_GDSC>;
+		};
+	};
+};
+
+/* Volume-down is wired to the PMIC "resin" line. */
+&pm8994_resin {
+	linux,code = <KEY_VOLUMEDOWN>;
+	status = "okay";
+};

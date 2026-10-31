@@ -1,0 +1,232 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * The Nexus 5X panel through mainline MDP5 + DSI instead of LK's framebuffer.
+ *
+ * Addresses, supplies and GPIOs come from the phone's 3.10 kernel:
+ * qcom/msm8992-mdss.dtsi, qcom/msm8992-mdss-pll.dtsi,
+ * lge/msm8992-bullhead-panel.dtsi and lge/msm8992-bullhead-regulator.dtsi.
+ * The layout follows oneplus2-mainline's op2-display.dtsi (MSM8994).
+ *
+ * Mainline has no 20nm DSI PLL driver. LK leaves the PLL running for this
+ * panel, so its two outputs are described as fixed clocks at the rates the
+ * panel mode asks for, and nothing reprograms the PLL (kernel patches keep
+ * the MDSS GDSC on and the DSI PHY as LK set it up):
+ *   1280 x 1936 x 60 Hz = 148684 kHz pixel, x 24 bits / 8 / 4 lanes = byte.
+ *
+ * No IOMMU node: the MDP then scans out of a contiguous VRAM carveout at its
+ * physical address (msm.vram on the command line), as the OnePlus 2 does.
+ */
+
+/ {
+	dsi0_pll_pixel: clock-dsi0-pll-pixel {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <148684000>;
+		clock-output-names = "dsi0pll";
+	};
+
+	dsi0_pll_byte: clock-dsi0-pll-byte {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <111513000>;
+		clock-output-names = "dsi0pllbyte";
+	};
+};
+
+&mmcc {
+	clocks = <&xo_board>,
+		 <&gcc GPLL0_OUT_MMSSCC>,
+		 <&rpmcc RPM_SMD_MMSSNOC_AHB_CLK>,
+		 <&rpmcc RPM_SMD_GFX3D_CLK_SRC>,
+		 <&dsi0_pll_pixel>,
+		 <&dsi0_pll_byte>,
+		 <0>,
+		 <0>,
+		 <0>;
+};
+
+&soc {
+	mdss: display-subsystem@fd900000 {
+		compatible = "qcom,mdss";
+		reg = <0xfd900000 0x1000>,
+		      <0xfd9b0000 0x1000>;
+		reg-names = "mdss_phys",
+			    "vbif_phys";
+
+		power-domains = <&mmcc MDSS_GDSC>;
+
+		clocks = <&mmcc MDSS_AHB_CLK>,
+			 <&mmcc MDSS_AXI_CLK>,
+			 <&mmcc MDSS_VSYNC_CLK>;
+		clock-names = "iface",
+			      "bus",
+			      "vsync";
+
+		interrupts = <GIC_SPI 83 IRQ_TYPE_LEVEL_HIGH>;
+
+		interrupt-controller;
+		#interrupt-cells = <1>;
+
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+
+		mdp: display-controller@fd901000 {
+			compatible = "qcom,mdp5";
+			reg = <0xfd901000 0x8f000>;
+			reg-names = "mdp_phys";
+
+			interrupt-parent = <&mdss>;
+			interrupts = <0>;
+
+			clocks = <&mmcc MDSS_AHB_CLK>,
+				 <&mmcc MDSS_AXI_CLK>,
+				 <&mmcc MDSS_MDP_CLK>,
+				 <&mmcc MDSS_VSYNC_CLK>;
+			clock-names = "iface",
+				      "bus",
+				      "core",
+				      "vsync";
+
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				port@0 {
+					reg = <0>;
+					mdp5_intf1_out: endpoint {
+						remote-endpoint = <&mdss_dsi0_in>;
+					};
+				};
+			};
+		};
+
+		mdss_dsi0: dsi@fd994000 {
+			compatible = "qcom,mdss-dsi-ctrl";
+			reg = <0xfd994000 0x260>;
+			reg-names = "dsi_ctrl";
+
+			interrupt-parent = <&mdss>;
+			interrupts = <4>;
+
+			clocks = <&mmcc MDSS_MDP_CLK>,
+				 <&mmcc MDSS_AHB_CLK>,
+				 <&mmcc MDSS_AXI_CLK>,
+				 <&mmcc MMSS_MISC_AHB_CLK>,
+				 <&mmcc MDSS_BYTE0_CLK>,
+				 <&mmcc MDSS_PCLK0_CLK>,
+				 <&mmcc MDSS_ESC0_CLK>;
+			clock-names = "mdp_core",
+				      "iface",
+				      "bus",
+				      "core_mmss",
+				      "byte",
+				      "pixel",
+				      "core";
+
+			phys = <&mdss_dsi0_phy>;
+
+			/* 3.10 qcom,ctrl-supply-entries: vdda 1.25 V, vddio 1.8 V, vcca 1.0 V */
+			vdda-supply = <&pm8994_l2>;
+			vddio-supply = <&pm8994_l12>;
+			vcca-supply = <&pm8994_l28>;
+
+			pinctrl-names = "default";
+			pinctrl-0 = <&bullhead_mdss_te>;
+
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				port@0 {
+					reg = <0>;
+					mdss_dsi0_in: endpoint {
+						remote-endpoint = <&mdp5_intf1_out>;
+					};
+				};
+
+				port@1 {
+					reg = <1>;
+					mdss_dsi0_out: endpoint {
+						data-lanes = <0 1 2 3>;
+						remote-endpoint = <&panel_in>;
+					};
+				};
+			};
+
+			panel@0 {
+				compatible = "lg,bullhead-jd35695b";
+				reg = <0>;
+
+				backlight = <&pmi8994_wled>;
+				/* qcom,platform-reset-gpio */
+				reset-gpios = <&tlmm 78 GPIO_ACTIVE_LOW>;
+				/* DW8768 DSV +-5.5 V: dw,ena-gpio, dw,enm-gpio */
+				dsv-pos-gpios = <&tlmm 89 GPIO_ACTIVE_HIGH>;
+				dsv-neg-gpios = <&tlmm 90 GPIO_ACTIVE_HIGH>;
+				tpvci-supply = <&pm8994_l22>;
+				tpio-supply = <&pm8994_l25>;
+
+				port {
+					panel_in: endpoint {
+						remote-endpoint = <&mdss_dsi0_out>;
+					};
+				};
+			};
+		};
+
+		mdss_dsi0_phy: phy@fd994500 {
+			compatible = "qcom,msm8992-dsi-phy-20nm";
+			reg = <0xfd994300 0x200>,
+			      <0xfd994500 0x280>,
+			      <0xfd994780 0x30>;
+			reg-names = "dsi_pll",
+				    "dsi_phy",
+				    "dsi_phy_regulator";
+
+			#clock-cells = <1>;
+			#phy-cells = <0>;
+
+			clocks = <&mmcc MDSS_AHB_CLK>,
+				 <&xo_board>;
+			clock-names = "iface",
+				      "ref";
+
+			vddio-supply = <&pm8994_l12>;
+			vcca-supply = <&pm8994_l28>;
+
+			/* the panel's qcom,mdss-dsi-t-clk-pre / -post */
+			qcom,bootloader-clk-pre = <0x29>;
+			qcom,bootloader-clk-post = <0x03>;
+		};
+	};
+};
+
+&tlmm {
+	/* 3.10 mdss_te_active: GPIO 10, mdp_vsync */
+	bullhead_mdss_te: mdss-te-state {
+		pins = "gpio10";
+		function = "mdp_vsync";
+		drive-strength = <2>;
+		bias-pull-down;
+	};
+};
+
+/*
+ * 3.10 msm-pmi8994.dtsi qcom,leds@d800 with the panel's overrides
+ * (msm8992-bullhead-panel.dtsi): strings 0 and 1, 15 mA, OVP 29.5 V
+ * (pmi8994_wled_ovp_values), 980 mA limit (nearest 970), 800 kHz.
+ */
+&pmi8994_wled {
+	status = "okay";
+	default-brightness = <1800>;	/* qcom,bl-default-lvl */
+	qcom,enabled-strings = <0 1>;
+	/delete-property/ qcom,cabc;
+	qcom,current-limit-microamp = <15000>;
+	qcom,ovp-millivolt = <29500>;
+	qcom,current-boost-limit = <970>;
+	qcom,switching-freq = <800>;
+};

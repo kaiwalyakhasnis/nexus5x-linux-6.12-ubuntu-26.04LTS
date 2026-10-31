@@ -1,0 +1,74 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bullhead-linux <kaiwalyakhasnis57@gmail.com>
+Date: Sat, 31 Oct 2026 06:54:57 +0900
+Subject: [PATCH 5/7] drm/msm/dsi: MSM8992 DSI host and 20nm PHY addresses
+
+The MSM8992 has the MSM8994's DSI 6G v1.3 host and 20nm PHY, but at
+0xfd994000/0xfd996000 (3.10 msm8992-mdss.dtsi). The host config picks its
+variant by address; the PHY gets its own compatible.
+---
+ drivers/gpu/drm/msm/dsi/dsi_cfg.c          |  2 ++
+ drivers/gpu/drm/msm/dsi/phy/dsi_phy.c      |  2 ++
+ drivers/gpu/drm/msm/dsi/phy/dsi_phy.h      |  1 +
+ drivers/gpu/drm/msm/dsi/phy/dsi_phy_20nm.c | 14 ++++++++++++++
+ 4 files changed, 19 insertions(+)
+
+diff --git a/drivers/gpu/drm/msm/dsi/dsi_cfg.c b/drivers/gpu/drm/msm/dsi/dsi_cfg.c
+index 8bf3266d1..d3b2e6ccc 100644
+--- a/drivers/gpu/drm/msm/dsi/dsi_cfg.c
++++ b/drivers/gpu/drm/msm/dsi/dsi_cfg.c
+@@ -95,6 +95,8 @@ static const struct msm_dsi_config msm8994_dsi_cfg = {
+ 	.num_bus_clks = ARRAY_SIZE(dsi_6g_bus_clk_names),
+ 	.io_start = {
+ 		{ 0xfd998000, 0xfd9a0000 },
++		/* MSM8992 (3.10 msm8992-mdss.dtsi) */
++		{ 0xfd994000, 0xfd996000 },
+ 	},
+ };
+ 
+diff --git a/drivers/gpu/drm/msm/dsi/phy/dsi_phy.c b/drivers/gpu/drm/msm/dsi/phy/dsi_phy.c
+index bdaeab533..2110feaea 100644
+--- a/drivers/gpu/drm/msm/dsi/phy/dsi_phy.c
++++ b/drivers/gpu/drm/msm/dsi/phy/dsi_phy.c
+@@ -551,6 +551,8 @@ static const struct of_device_id dsi_phy_dt_match[] = {
+ #ifdef CONFIG_DRM_MSM_DSI_20NM_PHY
+ 	{ .compatible = "qcom,dsi-phy-20nm",
+ 	  .data = &dsi_phy_20nm_cfgs },
++	{ .compatible = "qcom,msm8992-dsi-phy-20nm",
++	  .data = &dsi_phy_20nm_8992_cfgs },
+ #endif
+ #ifdef CONFIG_DRM_MSM_DSI_28NM_8960_PHY
+ 	{ .compatible = "qcom,dsi-phy-28nm-8960",
+diff --git a/drivers/gpu/drm/msm/dsi/phy/dsi_phy.h b/drivers/gpu/drm/msm/dsi/phy/dsi_phy.h
+index 64682ae63..9e6704507 100644
+--- a/drivers/gpu/drm/msm/dsi/phy/dsi_phy.h
++++ b/drivers/gpu/drm/msm/dsi/phy/dsi_phy.h
+@@ -45,6 +45,7 @@ extern const struct msm_dsi_phy_cfg dsi_phy_28nm_8226_cfgs;
+ extern const struct msm_dsi_phy_cfg dsi_phy_28nm_8937_cfgs;
+ extern const struct msm_dsi_phy_cfg dsi_phy_28nm_8960_cfgs;
+ extern const struct msm_dsi_phy_cfg dsi_phy_20nm_cfgs;
++extern const struct msm_dsi_phy_cfg dsi_phy_20nm_8992_cfgs;
+ extern const struct msm_dsi_phy_cfg dsi_phy_14nm_cfgs;
+ extern const struct msm_dsi_phy_cfg dsi_phy_14nm_660_cfgs;
+ extern const struct msm_dsi_phy_cfg dsi_phy_14nm_2290_cfgs;
+diff --git a/drivers/gpu/drm/msm/dsi/phy/dsi_phy_20nm.c b/drivers/gpu/drm/msm/dsi/phy/dsi_phy_20nm.c
+index 9918e69f2..a281f7d86 100644
+--- a/drivers/gpu/drm/msm/dsi/phy/dsi_phy_20nm.c
++++ b/drivers/gpu/drm/msm/dsi/phy/dsi_phy_20nm.c
+@@ -184,3 +184,16 @@ const struct msm_dsi_phy_cfg dsi_phy_20nm_cfgs = {
+ 	.num_dsi_phy = 2,
+ };
+ 
++/* MSM8992: same PHY, DSI blocks at 0xfd994000/0xfd996000 (3.10 msm8992-mdss.dtsi) */
++const struct msm_dsi_phy_cfg dsi_phy_20nm_8992_cfgs = {
++	.has_phy_regulator = true,
++	.regulator_data = dsi_phy_20nm_regulators,
++	.num_regulators = ARRAY_SIZE(dsi_phy_20nm_regulators),
++	.ops = {
++		.enable = dsi_20nm_phy_enable,
++		.disable = dsi_20nm_phy_disable,
++		.parse_dt_properties = dsi_20nm_phy_check_bootloader,
++	},
++	.io_start = { 0xfd994500, 0xfd996500 },
++	.num_dsi_phy = 2,
++};

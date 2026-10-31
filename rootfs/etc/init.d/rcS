@@ -1,0 +1,22 @@
+#!/bin/sh
+# sysinit: runs once, before any getty/shell is spawned.
+hostname bullhead
+echo 1 > /proc/sys/kernel/printk_devkmsg 2>/dev/null
+ifconfig lo 127.0.0.1 up
+MODEL=$(tr -d '\0' < /proc/device-tree/model 2>/dev/null || tr '\0' ' ' < /proc/device-tree/compatible)
+echo "rcS: running on: ${MODEL:-unknown}"
+
+UDC=$(ls /sys/class/udc 2>/dev/null | head -n1)
+if [ -n "$UDC" ]; then
+	/usr/share/learn/usb-gadget.sh "$UDC"
+	ifconfig usb0 172.16.42.1 netmask 255.255.255.0 up
+	udhcpd /etc/udhcpd.conf
+	telnetd -l /bin/sh
+	echo "rcS: USB network up – from the PC: telnet 172.16.42.1"
+else
+	echo "rcS: no USB device controller (normal in QEMU)"
+fi
+
+# Leave a boot report in persistent RAM. It survives a warm reboot, so you
+# can read it back from Android/TWRP: cat /sys/fs/pstore/pmsg-ramoops-0
+[ -c /dev/pmsg0 ] && /usr/share/learn/report.sh > /dev/pmsg0

@@ -1,0 +1,29 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bullhead-linux <kaiwalyakhasnis57@gmail.com>
+Date: Sat, 31 Oct 2026 06:53:30 +0900
+Subject: [PATCH 2/7] clk: qcom: mmcc-msm8994: keep the MDSS GDSC on
+
+From oneplus2-mainline (patch 0002, GPL-2.0). The DSI PLL sits in this
+power domain and mainline has no 20nm DSI PLL driver: the display relies on
+the PLL LK set up, which a GDSC power cycle would lose.
+---
+ drivers/clk/qcom/mmcc-msm8994.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/drivers/clk/qcom/mmcc-msm8994.c b/drivers/clk/qcom/mmcc-msm8994.c
+index f70d080bf..71f83edba 100644
+--- a/drivers/clk/qcom/mmcc-msm8994.c
++++ b/drivers/clk/qcom/mmcc-msm8994.c
+@@ -2306,6 +2306,12 @@ static struct gdsc mdss_gdsc = {
+ 		.name = "mdss_gdsc",
+ 	},
+ 	.pwrsts = PWRSTS_OFF_ON,
++	/*
++	 * The DSI PLLs sit in this power domain and mainline has no 20nm DSI
++	 * PLL driver: keep the domain up so the bootloader's PLL setup
++	 * survives the display driver's probe (OnePlus 2 bring-up).
++	 */
++	.flags = ALWAYS_ON,
+ };
+ 
+ static struct gdsc camss_top_gdsc = {

@@ -1,0 +1,395 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bullhead-linux <kaiwalyakhasnis57@gmail.com>
+Date: Sat, 31 Oct 2026 06:54:19 +0900
+Subject: [PATCH 3/7] arm64: smp: "qcom,8994-arm-cortex-acc" enable method (no
+ PSCI)
+
+From oneplus2-mainline (patch 0010, GPL-2.0), behind a Kconfig option.
+MSM8992/MSM8994 firmware has no PSCI: hand TrustZone the cold boot address
+over SCM, then release each core through its ACC power-control registers,
+as the downstream 3.10 kernel (msm8994_unclamp_secondary_arm_cpu) does.
+smp_init() runs before SCM probes, so the cores come up at late init.
+---
+ arch/arm64/Kconfig.platforms     |   9 +
+ arch/arm64/kernel/Makefile       |   1 +
+ arch/arm64/kernel/cpu_ops.c      |   6 +
+ arch/arm64/kernel/smp_qcom_acc.c | 315 +++++++++++++++++++++++++++++++
+ 4 files changed, 331 insertions(+)
+ create mode 100644 arch/arm64/kernel/smp_qcom_acc.c
+
+diff --git a/arch/arm64/Kconfig.platforms b/arch/arm64/Kconfig.platforms
+index 6c6d11536..2e62b18bc 100644
+--- a/arch/arm64/Kconfig.platforms
++++ b/arch/arm64/Kconfig.platforms
+@@ -270,6 +270,15 @@ config ARCH_QCOM
+ 	help
+ 	  This enables support for the ARMv8 based Qualcomm chipsets.
+ 
++config ARM64_QCOM_8994_ACC
++	bool "MSM8992/MSM8994 secondary CPU boot without PSCI"
++	depends on ARCH_QCOM && SMP && QCOM_SCM=y
++	help
++	  The firmware of MSM8992/MSM8994 phones (Nexus 5X, OnePlus 2) has no
++	  PSCI. This adds the "qcom,8994-arm-cortex-acc" enable method of the
++	  downstream kernel: the cold boot address goes to TrustZone with an SCM
++	  call, then each core is powered up through its ACC registers.
++
+ config ARCH_REALTEK
+ 	bool "Realtek Platforms"
+ 	select RESET_CONTROLLER
+diff --git a/arch/arm64/kernel/Makefile b/arch/arm64/kernel/Makefile
+index 2b112f3b7..52a0104ca 100644
+--- a/arch/arm64/kernel/Makefile
++++ b/arch/arm64/kernel/Makefile
+@@ -35,6 +35,7 @@ obj-y			:= debug-monitors.o entry.o irq.o fpsimd.o		\
+ 			   smp.o smp_spin_table.o topology.o smccc-call.o	\
+ 			   syscall.o proton-pack.o idle.o patching.o pi/
+ 
++obj-$(CONFIG_ARM64_QCOM_8994_ACC)	+= smp_qcom_acc.o
+ obj-$(CONFIG_COMPAT)			+= sys32.o signal32.o			\
+ 					   sys_compat.o
+ obj-$(CONFIG_COMPAT)			+= sigreturn32.o
+diff --git a/arch/arm64/kernel/cpu_ops.c b/arch/arm64/kernel/cpu_ops.c
+index e133011f6..84a181828 100644
+--- a/arch/arm64/kernel/cpu_ops.c
++++ b/arch/arm64/kernel/cpu_ops.c
+@@ -19,12 +19,18 @@ extern const struct cpu_operations smp_spin_table_ops;
+ extern const struct cpu_operations acpi_parking_protocol_ops;
+ #endif
+ extern const struct cpu_operations cpu_psci_ops;
++#ifdef CONFIG_ARM64_QCOM_8994_ACC
++extern const struct cpu_operations qcom_8994_acc_ops;
++#endif
+ 
+ static const struct cpu_operations *cpu_ops[NR_CPUS] __ro_after_init;
+ 
+ static const struct cpu_operations *const dt_supported_cpu_ops[] __initconst = {
+ 	&smp_spin_table_ops,
+ 	&cpu_psci_ops,
++#ifdef CONFIG_ARM64_QCOM_8994_ACC
++	&qcom_8994_acc_ops,
++#endif
+ 	NULL,
+ };
+ 
+diff --git a/arch/arm64/kernel/smp_qcom_acc.c b/arch/arm64/kernel/smp_qcom_acc.c
+new file mode 100644
+index 000000000..70b9e934f
+--- /dev/null
++++ b/arch/arm64/kernel/smp_qcom_acc.c
+@@ -0,0 +1,315 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Secondary CPU bring-up for MSM8992/MSM8994 firmware without PSCI
++ * (enable-method = "qcom,8994-arm-cortex-acc").
++ *
++ * From oneplus2-mainline (github.com/luvingiane/oneplus2-mainline, patch
++ * 0010, GPL-2.0), used here for the Nexus 5X (MSM8992). The sequence was
++ * checked against the Nexus 5X 3.10 kernel (drivers/soc/qcom/cpu_pwr_ctl.c),
++ * which is the same.
++ *
++ * Follows the OnePlus/CAF 3.10 kernel (drivers/soc/qcom/cpu_ops.c,
++ * cpu_pwr_ctl.c: msm8994_unclamp_secondary_arm_cpu): the cold boot address
++ * is handed to TrustZone with an SCM call, then the core's power switches,
++ * clamps and reset are released through its ACC (APC CPU power control)
++ * registers and the core starts at the kernel's secondary entry.
++ *
++ * Cores of the second cluster (A57) need their L2 powered first: a node
++ * linked with "qcom,l2ccc" gives the L2 power control block, its SPM (SAW,
++ * voltage control) and the SPM Q2S register; the sequence follows
++ * power_on_l2_msm8994() and msm_spm_turn_on_cpu_rail() of the OnePlus kernel.
++ */
++
++#include <linux/cpu.h>
++#include <linux/delay.h>
++#include <linux/firmware/qcom/qcom_scm.h>
++#include <linux/io.h>
++#include <linux/of.h>
++#include <linux/of_address.h>
++#include <linux/smp.h>
++#include <asm/cpu_ops.h>
++#include <asm/smp.h>
++#include <asm/smp_plat.h>
++#include <asm/memory.h>
++#include <asm/daifflags.h>
++#include <asm/proc-fns.h>
++
++#define CPU_PWR_CTL		0x4
++#define CPU_PWR_GATE_CTL	0x14
++
++#define L2_PWR_CTL_OVERRIDE	0xc
++#define L2_PWR_CTL		0x14
++#define L1_RST_DIS		0x284
++#define L2_SPM_STS		0xc
++#define L2_VREG_CTL		0x1c
++#define L2_PON_MASK		(BIT(9) | BIT(28))
++
++static phys_addr_t acc_base[NR_CPUS];
++static struct device_node *l2_node[NR_CPUS];
++
++/* power the cluster L2 up (once), as power_on_l2_msm8994() */
++static int qcom_acc_l2_on(unsigned int cpu)
++{
++	struct device_node *np = l2_node[cpu];
++	void __iomem *l2, *spm, *q2s;
++	u32 vctl, scm_reg, v;
++	int ret = 0;
++
++	if (!np)
++		return 0;
++	l2 = of_iomap(np, 0);
++	spm = of_iomap(np, 1);
++	q2s = of_iomap(np, 2);
++	if (!l2 || !spm || !q2s) {
++		ret = -ENOMEM;
++		goto out;
++	}
++	if (of_property_read_u32(np, "qcom,vctl-val", &vctl) ||
++	    of_property_read_u32(np, "qcom,l2-scm-reg", &scm_reg)) {
++		ret = -EINVAL;
++		goto out;
++	}
++
++	if ((readl_relaxed(l2 + L2_PWR_CTL) & L2_PON_MASK) == L2_PON_MASK) {
++		/* already on: wake its SPM if it runs the sleep state machine */
++		if (readl_relaxed(spm + L2_SPM_STS) & 0xffff0000) {
++			if (!qcom_scm_io_readl(scm_reg, &v))
++				qcom_scm_io_writel(scm_reg, v | BIT(0));
++		}
++		goto out;
++	}
++
++	pr_info("CPU%u: powering the L2 up (vctl 0x%x)\n", cpu, vctl);
++	/* SPM: Q2S channel ignored, no legacy mode; then the L2 rail */
++	writel_relaxed(0x2, q2s);
++	mb();
++	writel_relaxed(vctl & 0xff, spm + L2_VREG_CTL);
++	mb();
++	udelay(2000);
++	writel_relaxed(0x30080, spm + L2_VREG_CTL);
++	mb();
++	udelay(2000);
++
++	writel_relaxed(0x00000000, l2 + L1_RST_DIS);
++	mb();
++	writel_relaxed(0x00400000, l2 + L2_PWR_CTL_OVERRIDE);
++	mb();
++	writel_relaxed(0x00029716, l2 + L2_PWR_CTL);
++	mb();
++	udelay(8);
++	writel_relaxed(0x00023716, l2 + L2_PWR_CTL);
++	mb();
++	writel_relaxed(0x0002371e, l2 + L2_PWR_CTL);
++	mb();
++	udelay(8);
++	writel_relaxed(0x0002371c, l2 + L2_PWR_CTL);
++	mb();
++	udelay(4);
++	writel_relaxed(0x0002361c, l2 + L2_PWR_CTL);
++	mb();
++	udelay(2);
++	writel_relaxed(0x00022218, l2 + L2_PWR_CTL);
++	mb();
++	udelay(4);
++	writel_relaxed(0x10022218, l2 + L2_PWR_CTL);
++	mb();
++	writel_relaxed(0x00000000, l2 + L2_PWR_CTL_OVERRIDE);
++	mb();
++	pr_info("CPU%u: L2_PWR_CTL now 0x%08x\n", cpu, readl_relaxed(l2 + L2_PWR_CTL));
++out:
++	if (l2)
++		iounmap(l2);
++	if (spm)
++		iounmap(spm);
++	if (q2s)
++		iounmap(q2s);
++	return ret;
++}
++
++/* after the core is released: clear the L2 power bit request (scm_io) */
++static void qcom_acc_l2_after(unsigned int cpu)
++{
++	u32 scm_reg, v;
++
++	if (!l2_node[cpu] || of_property_read_u32(l2_node[cpu], "qcom,l2-scm-reg", &scm_reg))
++		return;
++	if (!qcom_scm_io_readl(scm_reg, &v))
++		qcom_scm_io_writel(scm_reg, v & ~BIT(0));
++}
++
++static int qcom_acc_cpu_init(unsigned int cpu)
++{
++	struct device_node *cpu_node, *acc_node;
++	struct resource res;
++	int ret;
++
++	cpu_node = of_get_cpu_node(cpu, NULL);
++	if (!cpu_node)
++		return -ENODEV;
++	acc_node = of_parse_phandle(cpu_node, "qcom,acc", 0);
++	l2_node[cpu] = of_parse_phandle(cpu_node, "qcom,l2ccc", 0);
++	of_node_put(cpu_node);
++	if (!acc_node) {
++		pr_err("CPU%u: no qcom,acc\n", cpu);
++		return -ENODEV;
++	}
++	ret = of_address_to_resource(acc_node, 0, &res);
++	of_node_put(acc_node);
++	if (ret)
++		return ret;
++	acc_base[cpu] = res.start;
++	return 0;
++}
++
++static int qcom_acc_cpu_prepare(unsigned int cpu)
++{
++	/* the SCM call is made at boot time (cpu_boot): this early SCM is not ready */
++	return 0;
++}
++
++static int qcom_acc_set_entry(unsigned int cpu)
++{
++	static bool done;
++	int ret;
++
++	if (done)
++		return 0;
++	/* smp_init() runs before the SCM driver probes: retried at late init */
++	if (!qcom_scm_is_available())
++		return -EPROBE_DEFER;
++	/* qcom_scm_set_cold_boot_addr() does virt_to_phys(): hand it the
++	 * linear-map alias of the entry's physical address */
++	ret = qcom_scm_set_cold_boot_addr_aarch64(phys_to_virt(__pa_symbol(secondary_entry)));
++	pr_info("CPU%u: cold boot address %pa: %d\n", cpu,
++		&(phys_addr_t){ __pa_symbol(secondary_entry) }, ret);
++	if (!ret)
++		done = true;
++	return ret;
++}
++
++static int qcom_acc_cpu_boot(unsigned int cpu)
++{
++	void __iomem *acc;
++
++	int ret;
++
++	if (!acc_base[cpu])
++		return -ENODEV;
++	ret = qcom_acc_set_entry(cpu);
++	if (ret)
++		return ret;
++	ret = qcom_acc_l2_on(cpu);
++	if (ret) {
++		pr_err("CPU%u: L2 power-up failed: %d\n", cpu, ret);
++		return ret;
++	}
++	pr_info("CPU%u: powering up through ACC %pa\n", cpu, &acc_base[cpu]);
++	acc = ioremap(acc_base[cpu], SZ_4K);
++	if (!acc)
++		return -ENOMEM;
++
++	/* head switch: a few, then the rest */
++	writel_relaxed(0x00000001, acc + CPU_PWR_GATE_CTL);
++	mb();
++	udelay(1);
++	writel_relaxed(0x00000003, acc + CPU_PWR_GATE_CTL);
++	mb();
++	udelay(1);
++	/* de-assert coremem clamp, close coremem array gdhs */
++	writel_relaxed(0x00000079, acc + CPU_PWR_CTL);
++	mb();
++	udelay(2);
++	writel_relaxed(0x0000007d, acc + CPU_PWR_CTL);
++	mb();
++	udelay(2);
++	/* de-assert clamps */
++	writel_relaxed(0x0000003d, acc + CPU_PWR_CTL);
++	mb();
++	writel_relaxed(0x0000003c, acc + CPU_PWR_CTL);
++	mb();
++	udelay(1);
++	/* de-assert core reset, then assert PWRDUP */
++	writel_relaxed(0x0000000c, acc + CPU_PWR_CTL);
++	mb();
++	writel_relaxed(0x0000008c, acc + CPU_PWR_CTL);
++	mb();
++	udelay(10);
++	pr_info("CPU%u: ACC PWR_CTL 0x%08x GATE_CTL 0x%08x\n", cpu,
++		readl_relaxed(acc + CPU_PWR_CTL), readl_relaxed(acc + CPU_PWR_GATE_CTL));
++
++	iounmap(acc);
++	qcom_acc_l2_after(cpu);
++
++	/* as the OnePlus kernel (secondary_pen_release): the new core waits
++	 * for an interrupt before it jumps to the boot address */
++	arch_smp_send_reschedule(cpu);	/* any SGI does */
++	sev();
++	return 0;
++}
++
++#ifdef CONFIG_HOTPLUG_CPU
++/*
++ * Minimal hotplug, mainly so the cores can be brought up by hand
++ * (/sys/devices/system/cpu/cpuN/online needs a hotpluggable CPU). A core
++ * taken down only parks in WFI; it is not powered off, so it cannot be
++ * brought back up without a reboot.
++ */
++static bool parked[NR_CPUS];
++
++static bool qcom_acc_cpu_can_disable(unsigned int cpu)
++{
++	return !parked[cpu];
++}
++
++static int qcom_acc_cpu_disable(unsigned int cpu)
++{
++	return 0;
++}
++
++static void qcom_acc_cpu_die(unsigned int cpu)
++{
++	parked[cpu] = true;
++	local_daif_mask();
++	for (;;)
++		cpu_do_idle();
++}
++
++static int qcom_acc_cpu_kill(unsigned int cpu)
++{
++	return 1;
++}
++#endif
++
++const struct cpu_operations qcom_8994_acc_ops = {
++	.name		= "qcom,8994-arm-cortex-acc",
++	.cpu_init	= qcom_acc_cpu_init,
++	.cpu_prepare	= qcom_acc_cpu_prepare,
++	.cpu_boot	= qcom_acc_cpu_boot,
++#ifdef CONFIG_HOTPLUG_CPU
++	.cpu_can_disable = qcom_acc_cpu_can_disable,
++	.cpu_disable	= qcom_acc_cpu_disable,
++	.cpu_die	= qcom_acc_cpu_die,
++	.cpu_kill	= qcom_acc_cpu_kill,
++#endif
++};
++
++/*
++ * The first try for each core, from smp_init(), comes before SCM is up and
++ * fails with -EPROBE_DEFER. Bring the cores up once it is, so they are
++ * online without anything written to sysfs.
++ */
++static int __init qcom_acc_boot_secondaries(void)
++{
++	unsigned int cpu;
++	int ret;
++
++	for_each_present_cpu(cpu) {
++		if (cpu_online(cpu) || !acc_base[cpu])
++			continue;
++		ret = add_cpu(cpu);
++		if (ret)
++			pr_err("CPU%u: did not come online: %d\n", cpu, ret);
++	}
++	return 0;
++}
++late_initcall_sync(qcom_acc_boot_secondaries);

@@ -1,0 +1,144 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bullhead-linux <kaiwalyakhasnis57@gmail.com>
+Date: Sat, 31 Oct 2026 06:54:47 +0900
+Subject: [PATCH 4/7] drm/msm/dsi: 20nm PHY: keep the PHY and PLL LK left
+ running
+
+From oneplus2-mainline (patch 0003, GPL-2.0). Mainline has no 20nm DSI PLL
+driver, so the display runs on the PLL the bootloader set up; a PHY reset
+or reprogramming drops it. When the PHY is found enabled at probe, leave it
+alone. Change for the Nexus 5X: the clock lane pre/post times come from
+qcom,bootloader-clk-pre/-post (the panel's 3.10 t-clk-pre/t-clk-post).
+---
+ drivers/gpu/drm/msm/dsi/dsi.h              |  1 +
+ drivers/gpu/drm/msm/dsi/dsi_manager.c      |  4 ++-
+ drivers/gpu/drm/msm/dsi/phy/dsi_phy.c      |  5 +++
+ drivers/gpu/drm/msm/dsi/phy/dsi_phy.h      |  3 ++
+ drivers/gpu/drm/msm/dsi/phy/dsi_phy_20nm.c | 39 ++++++++++++++++++++++
+ 5 files changed, 51 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/msm/dsi/dsi.h b/drivers/gpu/drm/msm/dsi/dsi.h
+index 87496db20..2d6fd97d0 100644
+--- a/drivers/gpu/drm/msm/dsi/dsi.h
++++ b/drivers/gpu/drm/msm/dsi/dsi.h
+@@ -142,6 +142,7 @@ int msm_dsi_phy_enable(struct msm_dsi_phy *phy,
+ 			struct msm_dsi_phy_clk_request *clk_req,
+ 			struct msm_dsi_phy_shared_timings *shared_timings);
+ void msm_dsi_phy_disable(struct msm_dsi_phy *phy);
++bool msm_dsi_phy_bootloader_kept(struct msm_dsi_phy *phy);
+ void msm_dsi_phy_set_usecase(struct msm_dsi_phy *phy,
+ 			     enum msm_dsi_phy_usecase uc);
+ void msm_dsi_phy_pll_save_state(struct msm_dsi_phy *phy);
+diff --git a/drivers/gpu/drm/msm/dsi/dsi_manager.c b/drivers/gpu/drm/msm/dsi/dsi_manager.c
+index 4fabb0134..c4ad9fe8a 100644
+--- a/drivers/gpu/drm/msm/dsi/dsi_manager.c
++++ b/drivers/gpu/drm/msm/dsi/dsi_manager.c
+@@ -163,7 +163,9 @@ dsi_mgr_phy_enable(int id,
+ 			}
+ 		}
+ 	} else {
+-		msm_dsi_host_reset_phy(msm_dsi->host);
++		/* a reset would drop the bootloader's PLL, which has no driver */
++		if (!msm_dsi_phy_bootloader_kept(msm_dsi->phy))
++			msm_dsi_host_reset_phy(msm_dsi->host);
+ 		ret = enable_phy(msm_dsi, &shared_timings[id]);
+ 		if (ret)
+ 			return ret;
+diff --git a/drivers/gpu/drm/msm/dsi/phy/dsi_phy.c b/drivers/gpu/drm/msm/dsi/phy/dsi_phy.c
+index dd58bc0a4..bdaeab533 100644
+--- a/drivers/gpu/drm/msm/dsi/phy/dsi_phy.c
++++ b/drivers/gpu/drm/msm/dsi/phy/dsi_phy.c
+@@ -807,6 +807,11 @@ int msm_dsi_phy_enable(struct msm_dsi_phy *phy,
+ 	return ret;
+ }
+ 
++bool msm_dsi_phy_bootloader_kept(struct msm_dsi_phy *phy)
++{
++	return phy && phy->bootloader_kept;
++}
++
+ void msm_dsi_phy_disable(struct msm_dsi_phy *phy)
+ {
+ 	if (!phy || !phy->cfg->ops.disable)
+diff --git a/drivers/gpu/drm/msm/dsi/phy/dsi_phy.h b/drivers/gpu/drm/msm/dsi/phy/dsi_phy.h
+index 4953459ed..64682ae63 100644
+--- a/drivers/gpu/drm/msm/dsi/phy/dsi_phy.h
++++ b/drivers/gpu/drm/msm/dsi/phy/dsi_phy.h
+@@ -114,6 +114,9 @@ struct msm_dsi_phy {
+ 
+ 	struct clk_hw *vco_hw;
+ 	bool pll_on;
++	/* bring-up: PHY + PLL left running by the bootloader, keep them */
++	bool bootloader_kept;
++	u32 bootloader_clk_pre, bootloader_clk_post;
+ 
+ 	struct clk_hw_onecell_data *provided_clocks;
+ 
+diff --git a/drivers/gpu/drm/msm/dsi/phy/dsi_phy_20nm.c b/drivers/gpu/drm/msm/dsi/phy/dsi_phy_20nm.c
+index cee34b76c..9918e69f2 100644
+--- a/drivers/gpu/drm/msm/dsi/phy/dsi_phy_20nm.c
++++ b/drivers/gpu/drm/msm/dsi/phy/dsi_phy_20nm.c
+@@ -81,6 +81,20 @@ static int dsi_20nm_phy_enable(struct msm_dsi_phy *phy,
+ 		return -EINVAL;
+ 	}
+ 
++	/*
++	 * Keep the bootloader's PHY registers. The host still programs the
++	 * clock lane pre/post times (CLKOUT_TIMING_CTRL) from this timing: use
++	 * the bootloader's/panel's values (qcom,bootloader-clk-pre/-post: 0x3e/
++	 * 0x20 on the OnePlus 2, 0x29/0x03 on the Nexus 5X), not the computed
++	 * ones, so they match the PHY setup that is kept.
++	 */
++	if (phy->bootloader_kept) {
++		timing->shared_timings.clk_pre = phy->bootloader_clk_pre;
++		timing->shared_timings.clk_post = phy->bootloader_clk_post;
++		timing->shared_timings.clk_pre_inc_by_2 = false;
++		return 0;
++	}
++
+ 	dsi_20nm_phy_regulator_ctrl(phy, true);
+ 
+ 	writel(0xff, base + REG_DSI_20nm_PHY_STRENGTH_0);
+@@ -124,10 +138,34 @@ static int dsi_20nm_phy_enable(struct msm_dsi_phy *phy,
+ 
+ static void dsi_20nm_phy_disable(struct msm_dsi_phy *phy)
+ {
++	if (phy->bootloader_kept)
++		return;
+ 	writel(0, phy->base + REG_DSI_20nm_PHY_CTRL_0);
+ 	dsi_20nm_phy_regulator_ctrl(phy, false);
+ }
+ 
++/*
++ * There is no 20nm DSI PLL driver: the PLL is the bootloader's, powered
++ * through this PHY's regulator. If the bootloader left the PHY enabled
++ * (CTRL_0 = 0x7f), keep PHY and PLL exactly as they are.
++ */
++static int dsi_20nm_phy_check_bootloader(struct msm_dsi_phy *phy)
++{
++	struct device_node *np = phy->pdev->dev.of_node;
++
++	phy->bootloader_clk_pre = 0x3e;
++	phy->bootloader_clk_post = 0x20;
++	of_property_read_u32(np, "qcom,bootloader-clk-pre", &phy->bootloader_clk_pre);
++	of_property_read_u32(np, "qcom,bootloader-clk-post", &phy->bootloader_clk_post);
++
++	if (readl(phy->base + REG_DSI_20nm_PHY_CTRL_0) == 0x7f) {
++		phy->bootloader_kept = true;
++		DRM_DEV_INFO(&phy->pdev->dev,
++			     "keeping the bootloader's PHY and PLL setup\n");
++	}
++	return 0;
++}
++
+ static const struct regulator_bulk_data dsi_phy_20nm_regulators[] = {
+ 	{ .supply = "vddio", .init_load_uA = 100000 },	/* 1.8 V */
+ 	{ .supply = "vcca", .init_load_uA = 10000 },	/* 1.0 V */
+@@ -140,6 +178,7 @@ const struct msm_dsi_phy_cfg dsi_phy_20nm_cfgs = {
+ 	.ops = {
+ 		.enable = dsi_20nm_phy_enable,
+ 		.disable = dsi_20nm_phy_disable,
++		.parse_dt_properties = dsi_20nm_phy_check_bootloader,
+ 	},
+ 	.io_start = { 0xfd998500, 0xfd9a0500 },
+ 	.num_dsi_phy = 2,
