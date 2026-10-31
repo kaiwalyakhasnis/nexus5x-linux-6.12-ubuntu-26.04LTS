@@ -34,9 +34,11 @@ Tested on a rev_1.0 board (LGH791, bootloader BHZ32c).
 | ✅ | Backlight (PMI8994 WLED) | Stock limits: 15 mA per string, 29.5 V OVP |
 | ✅ | USB network (NCM) + telnet | `telnet 172.16.42.1`. `conspy 2` lets you type into the shell on the panel |
 | ✅ | eMMC detected, pstore/ramoops, QEMU `virt` | eMMC is never mounted or written |
+| ✅ | Temperature sensors (TSENS) | 13 thermal zones in `/sys/class/thermal`, calibrated from the phone's fuses. Each shuts the phone down at 115 °C, the stock reset temperature |
+| ✅ | Reboot, and reboot to fastboot | `reboot-to bootloader` on the phone, or `scripts/phone-boot.sh` from the PC, gets to LK's fastboot with no buttons |
 | ⚠️ | Display on every boot | About 1 boot in 6 the RPM (SMD) does not answer. Then there are no RPM regulators, and the panel stays frozen on the bootloader's Google logo (telnet still works). A `reboot` from such a boot can hang: hold Power, then Power + Volume down |
 | ⚠️ | Boot-time `WARNING` from `wled_ovp_work` | An unbalanced `enable_irq`, because the bootloader leaves the backlight on. Cosmetic |
-| ❌ | CPU frequency scaling, CPR, TSENS thermal | Not in mainline for 8992/8994. Needs 3.10 `clock-cpu-8994` and `cpr-regulator` ported |
+| ❌ | CPU frequency scaling, CPR, thermal throttling | Not in mainline for 8992/8994. Needs 3.10 `clock-cpu-8994` and `cpr-regulator` ported |
 | ❌ | GPU (Adreno 418), IOMMU | Scanout uses a contiguous carveout instead |
 | ❌ | Touch, Wi-Fi/BT, modem, audio, camera, sensors, battery/charging | Not attempted |
 
@@ -83,11 +85,19 @@ a shell on CPU0. These are the extra pieces:
    and the DSI supplies (L2, L12, L28) come from the 3.10 dtsi.
 8. **Size diet** (`scripts/kernel.config`): everything is built in and there
    are no modules, so the image fits the bootloader's load window.
+9. **TSENS** (0010): the 8992's sensor block is TSENS v1 with 16 sensors, 13 of
+   them used. Its calibration fuses are decoded as in 3.10's
+   `tsens_calib_8992_sensors()`.
+10. **Reboot**: `qcom-pon` must be built in. Its child power-key driver sets
+    the PMIC to reset, not power off, when the kernel releases PS_HOLD. LK reads
+    the reboot reason in LG's own encoding (bits swapped, shifted by 1), so the
+    DT sets `mode-bootloader = <0x10>` and `mode-recovery = <0x8>`. BusyBox's
+    `reboot` can't pass a reason, so `tools/reboot-to` does.
 
 Patches 0001-0004 and 0009 come from
 [oneplus2-mainline](https://github.com/luvingiane/oneplus2-mainline)
 (OnePlus 2, MSM8994, GPL-2.0). Each value was checked against the Nexus 5X's
-own 3.10 kernel source. Patches 0005-0008 are new.
+own 3.10 kernel source. Patches 0005-0008 and 0010 are new.
 
 ## Build and boot
 
@@ -108,18 +118,22 @@ telnet 172.16.42.1                 # PC side gets 172.16.42.2 over DHCP
 
 * **Black panel?** Hold Power for 10 s and try `boot-rev-10-keep.img`, which
   keeps LK's panel state instead of re-initialising the panel.
-* **Getting back to fastboot:** `reboot` in telnet, then
-  `adb reboot bootloader` once LineageOS (or whatever is installed) is up.
+* **Getting back to fastboot:** `reboot-to bootloader` in telnet. Or run
+  `scripts/phone-boot.sh [image]`: from this kernel, from Android (adb) or
+  from fastboot, it gets to fastboot, boots the image and waits for the USB
+  network.
 
 ## Layout
 
 | Path | What it is |
 |---|---|
-| `patches/` | The 9 kernel patches above, applied by `scripts/prepare-kernel.sh` |
-| `dts/` | Board files: mainline `msm8992-lg-bullhead`, `bullhead-smp.dtsi` (ACC for CPU1-5, A57 L2 and clock mux), `bullhead-display.dtsi` (MDSS, DSI, panel, WLED) |
+| `patches/` | The 10 kernel patches above, applied by `scripts/prepare-kernel.sh` |
+| `dts/` | Board files: mainline `msm8992-lg-bullhead`, `bullhead-smp.dtsi` (ACC for CPU1-5, A57 L2 and clock mux), `bullhead-display.dtsi` (MDSS, DSI, panel, WLED), `bullhead-thermal.dtsi` (QFPROM, TSENS, thermal zones) |
 | `scripts/kernel.config` | Options built into the kernel, plus the size diet |
 | `rootfs/` | `/init` (mounts, then hands off to BusyBox init), `inittab`, `rcS` (USB gadget, telnetd), status screen, boot report |
 | `scripts/mkbootimg.py` | A ~60-line Android boot image writer |
 | `tools/gen-jd35695b-gamma.py` | Turns the 3.10 panel gamma tables into the driver's header |
+| `tools/reboot-to/` | `reboot-to bootloader\|recovery`: reboot with a reason, built into the initramfs |
+| `scripts/phone-boot.sh` | From wherever the phone is, to fastboot, then `fastboot boot` an image |
 
 Kernel patches are GPL-2.0, like the kernel they apply to.

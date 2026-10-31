@@ -9,3 +9,4 @@
 #include "bullhead-learn.dtsi"
 #include "bullhead-smp.dtsi"
 #include "bullhead-display.dtsi"
+#include "bullhead-thermal.dtsi"

@@ -1,0 +1,216 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bullhead-linux <kaiwalyakhasnis57@gmail.com>
+Date: Sat, 31 Oct 2026 11:29:02 +0900
+Subject: [PATCH 10/10] thermal/drivers/qcom/tsens: add MSM8992
+
+TSENS on MSM8992 is v1.2 with the v1 register layout (status at TM 0x44,
+TRDY at TM 0x84) but 16 sensors, 13 of them used (hw ids 0-5, 7, 9-14).
+Calibration follows the 3.10 kernel's tsens_calib_8992_sensors(): base0
+(30 degC) and base1 (120 degC) codes in QFPROM 0xd0, then a 4-bit offset
+per sensor in sensor order from bit 20, mode in bits 20-22 of the third
+word. Without two-point calibration, the 3.10 qcom,slope values and code
+532 at 30 degC are used.
+---
+ drivers/thermal/qcom/tsens-v1.c | 156 ++++++++++++++++++++++++++++++++
+ drivers/thermal/qcom/tsens.c    |   3 +
+ drivers/thermal/qcom/tsens.h    |   2 +-
+ 3 files changed, 160 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/thermal/qcom/tsens-v1.c b/drivers/thermal/qcom/tsens-v1.c
+index 1a7874676..6b49f05a9 100644
+--- a/drivers/thermal/qcom/tsens-v1.c
++++ b/drivers/thermal/qcom/tsens-v1.c
+@@ -3,6 +3,7 @@
+  * Copyright (c) 2019, Linaro Limited
+  */
+ 
++#include <linux/bitfield.h>
+ #include <linux/bitops.h>
+ #include <linux/regmap.h>
+ #include <linux/delay.h>
+@@ -194,3 +195,158 @@ struct tsens_plat_data data_8976 = {
+ 	.feat		= &tsens_v1_feat,
+ 	.fields		= tsens_v1_regfields,
+ };
++
++/*
++ * MSM8992 (Nexus 5X): TSENS v1.2 with 16 sensors, of which 13 are used.
++ * Calibration from the 3.10 kernel (msm8974-tsens.c,
++ * tsens_calib_8992_sensors()): QFPROM 0xfc4bc0d0 holds base0 (30 degC) and
++ * base1 (120 degC) codes, then a 4-bit offset per sensor in sensor order from
++ * bit 20 on, and the calibration mode in bits 20-22 of the third word.
++ * 0xfc4bc464 bits 29-31 select backup rows when 3 (not handled here).
++ */
++static const struct reg_field tsens_8992_regfields[MAX_REGFIELDS] = {
++	/* ----- SROT ------ */
++	/* VERSION */
++	[VER_MAJOR] = REG_FIELD(SROT_HW_VER_OFF, 28, 31),
++	[VER_MINOR] = REG_FIELD(SROT_HW_VER_OFF, 16, 27),
++	[VER_STEP]  = REG_FIELD(SROT_HW_VER_OFF,  0, 15),
++	/* CTRL_OFFSET */
++	[TSENS_EN]     = REG_FIELD(SROT_CTRL_OFF, 0,  0),
++	[TSENS_SW_RST] = REG_FIELD(SROT_CTRL_OFF, 1,  1),
++	[SENSOR_EN]    = REG_FIELD(SROT_CTRL_OFF, 3, 18),
++
++	/* ----- TM ------ */
++	/* INTERRUPT ENABLE */
++	[INT_EN]     = REG_FIELD(TM_INT_EN_OFF, 0, 0),
++
++	/* UPPER/LOWER TEMPERATURE THRESHOLDS */
++	REG_FIELD_FOR_EACH_SENSOR16(LOW_THRESH,    TM_Sn_UPPER_LOWER_STATUS_CTRL_OFF,  0,  9),
++	REG_FIELD_FOR_EACH_SENSOR16(UP_THRESH,     TM_Sn_UPPER_LOWER_STATUS_CTRL_OFF, 10, 19),
++
++	/* UPPER/LOWER INTERRUPTS [CLEAR/STATUS] */
++	REG_FIELD_FOR_EACH_SENSOR16(LOW_INT_CLEAR, TM_Sn_UPPER_LOWER_STATUS_CTRL_OFF, 20, 20),
++	REG_FIELD_FOR_EACH_SENSOR16(UP_INT_CLEAR,  TM_Sn_UPPER_LOWER_STATUS_CTRL_OFF, 21, 21),
++	[LOW_INT_STATUS_0] = REG_FIELD(TM_HIGH_LOW_INT_STATUS_OFF,  0,  0),
++	[LOW_INT_STATUS_1] = REG_FIELD(TM_HIGH_LOW_INT_STATUS_OFF,  1,  1),
++	[LOW_INT_STATUS_2] = REG_FIELD(TM_HIGH_LOW_INT_STATUS_OFF,  2,  2),
++	[LOW_INT_STATUS_3] = REG_FIELD(TM_HIGH_LOW_INT_STATUS_OFF,  3,  3),
++	[LOW_INT_STATUS_4] = REG_FIELD(TM_HIGH_LOW_INT_STATUS_OFF,  4,  4),
++	[LOW_INT_STATUS_5] = REG_FIELD(TM_HIGH_LOW_INT_STATUS_OFF,  5,  5),
++	[LOW_INT_STATUS_6] = REG_FIELD(TM_HIGH_LOW_INT_STATUS_OFF,  6,  6),
++	[LOW_INT_STATUS_7] = REG_FIELD(TM_HIGH_LOW_INT_STATUS_OFF,  7,  7),
++	[UP_INT_STATUS_0]  = REG_FIELD(TM_HIGH_LOW_INT_STATUS_OFF,  8,  8),
++	[UP_INT_STATUS_1]  = REG_FIELD(TM_HIGH_LOW_INT_STATUS_OFF,  9,  9),
++	[UP_INT_STATUS_2]  = REG_FIELD(TM_HIGH_LOW_INT_STATUS_OFF, 10, 10),
++	[UP_INT_STATUS_3]  = REG_FIELD(TM_HIGH_LOW_INT_STATUS_OFF, 11, 11),
++	[UP_INT_STATUS_4]  = REG_FIELD(TM_HIGH_LOW_INT_STATUS_OFF, 12, 12),
++	[UP_INT_STATUS_5]  = REG_FIELD(TM_HIGH_LOW_INT_STATUS_OFF, 13, 13),
++	[UP_INT_STATUS_6]  = REG_FIELD(TM_HIGH_LOW_INT_STATUS_OFF, 14, 14),
++	[UP_INT_STATUS_7]  = REG_FIELD(TM_HIGH_LOW_INT_STATUS_OFF, 15, 15),
++
++	/* NO CRITICAL INTERRUPT SUPPORT on v1 */
++
++	/* Sn_STATUS */
++	REG_FIELD_FOR_EACH_SENSOR16(LAST_TEMP,    TM_Sn_STATUS_OFF,  0,  9),
++	REG_FIELD_FOR_EACH_SENSOR16(VALID,        TM_Sn_STATUS_OFF, 14, 14),
++	/* xxx_STATUS bits: 1 == threshold violated */
++	REG_FIELD_FOR_EACH_SENSOR16(MIN_STATUS,   TM_Sn_STATUS_OFF, 10, 10),
++	REG_FIELD_FOR_EACH_SENSOR16(LOWER_STATUS, TM_Sn_STATUS_OFF, 11, 11),
++	REG_FIELD_FOR_EACH_SENSOR16(UPPER_STATUS, TM_Sn_STATUS_OFF, 12, 12),
++	/* No CRITICAL field on v1.x */
++	REG_FIELD_FOR_EACH_SENSOR16(MAX_STATUS,   TM_Sn_STATUS_OFF, 13, 13),
++
++	/* TRDY: 1=ready, 0=in progress */
++	[TRDY] = REG_FIELD(TM_TRDY_OFF, 0, 0),
++};
++
++#define CAL_8992_BASE0		GENMASK(9, 0)
++#define CAL_8992_BASE1		GENMASK(19, 10)
++#define CAL_8992_MODE		GENMASK(22, 20)
++#define CAL_8992_REDUN_SEL	GENMASK(31, 29)
++#define CAL_8992_REDUN_BACKUP	0x3
++#define CAL_8992_NO_CALIB_CODE	532
++
++static int calibrate_8992(struct tsens_priv *priv)
++{
++	u32 p1[MAX_SENSORS], p2[MAX_SENSORS];
++	u32 *cdata, *sel, base0, base1, mode;
++	u64 offsets;
++	int i;
++
++	sel = (u32 *)qfprom_read(priv->dev, "calib_sel");
++	if (IS_ERR(sel))
++		return PTR_ERR(sel);
++
++	cdata = (u32 *)qfprom_read(priv->dev, "calib");
++	if (IS_ERR(cdata)) {
++		kfree(sel);
++		return PTR_ERR(cdata);
++	}
++
++	mode = FIELD_GET(CAL_8992_MODE, cdata[2]);
++	if (FIELD_GET(CAL_8992_REDUN_SEL, *sel) == CAL_8992_REDUN_BACKUP) {
++		dev_warn(priv->dev, "backup calibration rows are not supported, running uncalibrated\n");
++		mode = 0;
++	}
++	base0 = FIELD_GET(CAL_8992_BASE0, cdata[0]);
++	base1 = FIELD_GET(CAL_8992_BASE1, cdata[0]);
++	offsets = (cdata[0] >> 20) | ((u64)cdata[1] << 12) | ((u64)cdata[2] << 44);
++
++	for (i = 0; i < priv->num_sensors; i++) {
++		u32 off = (offsets >> (4 * i)) & 0xf;
++
++		if (mode == TWO_PT_CALIB) {
++			p1[i] = base0 + off;
++			p2[i] = base1 + off;
++		} else {
++			p1[i] = CAL_8992_NO_CALIB_CODE;
++			p2[i] = 0;
++		}
++	}
++	dev_info(priv->dev, "calibration mode %u, base0 %u, base1 %u\n",
++		 mode, base0, base1);
++
++	compute_intercept_slope(priv, p1, p2, mode == TWO_PT_CALIB ? TWO_PT_CALIB : 0);
++
++	kfree(cdata);
++	kfree(sel);
++	return 0;
++}
++
++/* qcom,slope of the 3.10 tsens node, used without two-point calibration */
++static int __init init_8992(struct tsens_priv *priv)
++{
++	static const u32 slope[] = { 2901, 2846, 3200, 3200, 3200, 3200, 3200,
++				     3200, 3200, 3200, 3200, 3200, 3200 };
++	int i;
++
++	for (i = 0; i < priv->num_sensors && i < ARRAY_SIZE(slope); i++)
++		priv->sensor[i].slope = slope[i];
++
++	return init_common(priv);
++}
++
++static struct tsens_features tsens_8992_feat = {
++	.ver_major	= VER_1_X,
++	.crit_int	= 0,
++	.combo_int	= 0,
++	.adc		= 1,
++	.srot_split	= 1,
++	.max_sensors	= 16,
++	.trip_min_temp	= -40000,
++	.trip_max_temp	= 120000,
++};
++
++static const struct tsens_ops ops_8992 = {
++	.init		= init_8992,
++	.calibrate	= calibrate_8992,
++	.get_temp	= get_temp_tsens_valid,
++};
++
++struct tsens_plat_data data_8992 = {
++	.num_sensors	= 13,
++	.ops		= &ops_8992,
++	.feat		= &tsens_8992_feat,
++	.fields		= tsens_8992_regfields,
++	.hw_ids		= (unsigned int []){ 0, 1, 2, 3, 4, 5, 7, 9, 10, 11, 12, 13, 14 },
++};
+diff --git a/drivers/thermal/qcom/tsens.c b/drivers/thermal/qcom/tsens.c
+index 5f62e17be..d85553978 100644
+--- a/drivers/thermal/qcom/tsens.c
++++ b/drivers/thermal/qcom/tsens.c
+@@ -1177,6 +1177,9 @@ static const struct of_device_id tsens_table[] = {
+ 	}, {
+ 		.compatible = "qcom,msm8974-tsens",
+ 		.data = &data_8974,
++	}, {
++		.compatible = "qcom,msm8992-tsens",
++		.data = &data_8992,
+ 	}, {
+ 		.compatible = "qcom,msm8976-tsens",
+ 		.data = &data_8976,
+diff --git a/drivers/thermal/qcom/tsens.h b/drivers/thermal/qcom/tsens.h
+index 4d02be5a0..51c19e199 100644
+--- a/drivers/thermal/qcom/tsens.h
++++ b/drivers/thermal/qcom/tsens.h
+@@ -648,7 +648,7 @@ extern struct tsens_plat_data data_8960;
+ extern struct tsens_plat_data data_8226, data_8909, data_8916, data_8939, data_8974, data_9607;
+ 
+ /* TSENS v1 targets */
+-extern struct tsens_plat_data data_tsens_v1, data_8937, data_8976, data_8956;
++extern struct tsens_plat_data data_tsens_v1, data_8937, data_8976, data_8956, data_8992;
+ 
+ /* TSENS v2 targets */
+ extern struct tsens_plat_data data_8996, data_ipq8074, data_tsens_v2;

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: bullhead-linux <kaiwalyakhasnis57@gmail.com>
 Date: Sat, 31 Oct 2026 11:16:28 +0900
-Subject: [PATCH 8/9] arm64: smp: qcom ACC: set the A57 cluster clock before
+Subject: [PATCH 08/10] arm64: smp: qcom ACC: set the A57 cluster clock before
  its L2 powers up
 
 The bootloader leaves the A57 cluster on the 19.2 MHz reference clock.

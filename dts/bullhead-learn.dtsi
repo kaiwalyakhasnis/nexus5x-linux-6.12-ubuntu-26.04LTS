@@ -33,3 +33,14 @@
 	linux,code = <KEY_VOLUMEDOWN>;
 	status = "okay";
 };
+
+/*
+ * Reboot reasons for LK (aboot), as the LG 3.10 kernel stores them in the PMIC
+ * (qpnp_pon_set_restart_reason): reason r becomes ((r & 7) << 4) | (r >> 3),
+ * written to SOFT_RB_SPARE bits 7:1. bootloader (2) -> 0x40, recovery (1) ->
+ * 0x20. qcom-pon writes magic << 2 to bits 7:2, hence 0x10 and 0x8.
+ */
+&pm8994_pon {
+	mode-bootloader = <0x10>;
+	mode-recovery = <0x8>;
+};

@@ -1,0 +1,72 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * TSENS (v1.2, 16 sensors, 13 used) and its calibration fuses, from the 3.10
+ * qcom/msm8992.dtsi tsens@fc4a8000: SROT at 0xfc4a8000, TM at 0xfc4a9000,
+ * QFPROM at 0xfc4bc000, "tsens-upper-lower" interrupt SPI 184. Needs kernel
+ * patch "thermal/drivers/qcom/tsens: add MSM8992".
+ *
+ * Sensors per CPU from the 3.10 qcom,msm-thermal node (qcom,cpu-sensors):
+ * CPU0/1 hw 7, CPU2 hw 9, CPU3 hw 10, CPU4 hw 13, CPU5 hw 14. Every zone gets
+ * the stock reset temperature (qcom,therm-reset-temp = <115>) as its critical
+ * trip; the kernel then shuts the phone down.
+ */
+&soc {
+	qfprom: qfprom@fc4bc000 {
+		compatible = "qcom,msm8994-qfprom", "qcom,qfprom";
+		reg = <0xfc4bc000 0x1000>;
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		tsens_calib: calib@d0 {
+			reg = <0xd0 0xc>;
+		};
+
+		tsens_calib_sel: calib-sel@464 {
+			reg = <0x464 0x4>;
+		};
+	};
+
+	tsens: thermal-sensor@fc4a9000 {
+		compatible = "qcom,msm8992-tsens";
+		reg = <0xfc4a9000 0x1000>,	/* TM */
+		      <0xfc4a8000 0x1000>;	/* SROT */
+		nvmem-cells = <&tsens_calib>, <&tsens_calib_sel>;
+		nvmem-cell-names = "calib", "calib_sel";
+		interrupts = <GIC_SPI 184 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "uplow";
+		#qcom,sensors = <13>;
+		#thermal-sensor-cells = <1>;
+	};
+};
+
+#define BULLHEAD_TZ(_name, _hw)						\
+	_name {								\
+		polling-delay-passive = <250>;				\
+		polling-delay = <1000>;					\
+		thermal-sensors = <&tsens _hw>;				\
+		trips {							\
+			reset {						\
+				temperature = <115000>;			\
+				hysteresis = <2000>;			\
+				type = "critical";			\
+			};						\
+		};							\
+	}
+
+/ {
+	thermal-zones {
+		BULLHEAD_TZ(tsens0-thermal, 0);
+		BULLHEAD_TZ(tsens1-thermal, 1);
+		BULLHEAD_TZ(tsens2-thermal, 2);
+		BULLHEAD_TZ(tsens3-thermal, 3);
+		BULLHEAD_TZ(tsens4-thermal, 4);
+		BULLHEAD_TZ(tsens5-thermal, 5);
+		BULLHEAD_TZ(cpu0-1-thermal, 7);
+		BULLHEAD_TZ(cpu2-thermal, 9);
+		BULLHEAD_TZ(cpu3-thermal, 10);
+		BULLHEAD_TZ(tsens11-thermal, 11);
+		BULLHEAD_TZ(tsens12-thermal, 12);
+		BULLHEAD_TZ(cpu4-thermal, 13);
+		BULLHEAD_TZ(cpu5-thermal, 14);
+	};
+};
