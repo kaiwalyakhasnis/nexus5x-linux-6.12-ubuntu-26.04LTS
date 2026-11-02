@@ -54,7 +54,7 @@ Tested on a rev_1.0 board (LGH791, bootloader BHZ32c).
 | ✅ | USB host: keyboard | `fusb301`, `qpnp-smbcharger` (OTG), `dwc3-msm` | New `fusb301`, new `qcom-pmi8994-otg`, mainline `dwc3` (xHCI) and `usbhid` | [0013](patches/0013-regulator-add-the-PMI8994-OTG-boost.patch), [0014](patches/0014-usb-misc-add-the-FUSB301-Type-C-CC-controller.patch) | A USB keyboard on a USB-C OTG adapter types into the shell on the panel (tty1; Alt+F2 shows the status screen). The FUSB301 switches the port to host and turns on 5 V; the PC's USB network comes back when it is plugged in again |
 | ✅ | Ubuntu 26.04.1 LTS userspace | — | — | — | Ubuntu Base (arm64) unpacked into RAM and entered with `ubuntu-chroot`. `apt` works through a proxy on the PC, and an SSH server gives a full Ubuntu login from the PC. Gone after a reboot |
 | ✅ | Ubuntu desktop on the PC | — | Mainline `nbd` for the root disk | — | Ubuntu with systemd as the whole system, its root disk a file on the PC (NBD over the USB network). XFCE runs in TigerVNC and shows in the PC's browser (noVNC). Software rendering |
-| ⚠️ | Lomiri on the panel (Ubuntu Touch's shell) | — | Ubuntu 26.04's Lomiri 0.5 and Mir 2.25, unchanged, on the GPU above | — | Shell, indicator panel, Settings, Terminal, Morph browser and the on-screen keyboard run on the GPU. Not in the release disk, and started by hand, not at boot |
+| ⚠️ | Lomiri on the panel (Ubuntu Touch's shell) | — | Ubuntu 26.04's Lomiri 0.5 and Mir 2.25, unchanged, on the GPU above | — | Shell, indicator panel, Settings, Terminal, Morph browser and the on-screen keyboard run on the GPU. The release disk starts it at boot |
 | ✅ | Wi-Fi (QCA6174 on PCIe) | `qcacld-2.0`, `cnss`, `msm_pcie` | Mainline `ath10k_pci`, mainline `pcie-qcom`, new `phy-qcom-pcie-msm8994` | [0015](patches/0015-clk-qcom-gcc-msm8994-PCIe0-pipe-clock-from-the-PHY.patch)\*, [0016](patches/0016-clk-qcom-gcc-msm8994-PCIe-PHY-pipe-resets.patch)\*, [0017](patches/0017-clk-qcom-gcc-msm8994-give-the-PCIe-aux-RCGs-a-parent.patch)\*, [0018](patches/0018-clk-qcom-gcc-msm8994-do-not-wait-for-the-PCIe-aux-br.patch)\*, [0019](patches/0019-phy-qcom-add-the-MSM8994-MSM8992-PCIe-PHY-20nm-QMP.patch), [0020](patches/0020-PCI-qcom-add-MSM8994-MSM8992.patch) | PCIe Gen 1 x1 link, mainline `ath10k` with linux-firmware's `firmware-6.bin`. Scans 2.4 and 5 GHz, WPA2, DHCP. The calibration comes from the phone's own vendor partition |
 | ✅ | USB host: mouse | `fusb301`, `qpnp-smbcharger` (OTG), `dwc3-msm` | Same as the keyboard; mainline `usbhid` | [0013](patches/0013-regulator-add-the-PMI8994-OTG-boost.patch), [0014](patches/0014-usb-misc-add-the-FUSB301-Type-C-CC-controller.patch) | A USB mouse on the same adapter works like any USB HID device. `touchtest` shows a pointer and paints with the left button |
 | ✅ | eMMC detected, pstore/ramoops, QEMU `virt` | `sdhci-msm`, `ramoops` | Mainline `sdhci-msm`, `ramoops` | — | eMMC is never written. Only the vendor partition is mounted, read-only, for the Wi-Fi calibration |
@@ -207,27 +207,40 @@ value was checked against the Nexus 5X's own 3.10 kernel source. Patches
 ## Ubuntu desktop on the PC
 
 Ubuntu 26.04.1 with XFCE runs on the phone and shows in the PC's browser over
-the USB cable. Nothing is flashed: the kernel boots from RAM, and Ubuntu's
-disk is a file on the PC that the phone reads and writes over USB (NBD), so
-keep the PC side running.
+the USB cable. It's on the release disk, which starts
+[Lomiri](#lomiri-on-the-panel) by default. To switch, in Lomiri's Terminal app:
 
-1. From the [releases](../../releases), get `nexus5x-ubuntu-desktop-*.tar`
-   and `ubuntu-26.04-xfce-nexus5x.img.zst`. Unpack the tar and put the disk
-   in its folder.
-2. `sudo apt install fastboot adb qemu-utils zstd`. Unlocked bootloader;
-   phone on USB in Android (USB debugging on) or fastboot.
-3. `./nexus5x-desktop.sh`. The browser opens `http://172.16.42.1:6080`; the
-   VNC password is shown on the phone's screen (or `./show-password.sh`).
+```sh
+sudo systemctl disable lomiri-phone
+sudo systemctl enable xfce-vnc novnc
+sudo reboot
+```
 
-Wi-Fi: `sudo nmtui` in the desktop's terminal. To build the disk yourself:
-`tools/ubuntu/nbd-root.sh`, `nbd-install.sh`, `desktop-setup.sh`, then
-`make-release-disk.sh` and `make-release.sh` for the release files.
+Then run `./nexus5x-desktop.sh` again. The browser opens
+`http://172.16.42.1:6080`, and `./show-password.sh` prints the VNC password.
+
+To build the disk yourself: `tools/ubuntu/nbd-root.sh`, `nbd-install.sh`,
+`desktop-setup.sh`, then `make-release-disk.sh` and `make-release.sh` for the
+release files.
 
 ## Lomiri on the panel
 
 Lomiri, Ubuntu Touch's shell, runs on the phone's own screen, drawn by the
-GPU. It isn't in the release disk yet, so it goes on a disk you built yourself
-(see above), with the phone booted from `out/boot-ubuntu-rev-*.img`:
+GPU. Nothing is flashed: the kernel boots from RAM, and Ubuntu's disk is a file
+on the PC that the phone reads and writes over USB (NBD), so keep the PC side
+running.
+
+1. From the [releases](../../releases), get `nexus5x-ubuntu-desktop-*.tar`
+   and `ubuntu-26.04-lomiri-nexus5x.img.zst`. Unpack the tar and put the disk
+   in its folder.
+2. `sudo apt install fastboot adb qemu-utils zstd`. Unlocked bootloader;
+   phone on USB in Android (USB debugging on) or fastboot.
+3. `./nexus5x-desktop.sh`, and keep it running. Lomiri comes up on the phone.
+
+Wi-Fi: `sudo nmtui` in the Terminal app.
+
+To set it up on a disk you built yourself (see above), with the phone booted
+from `out/boot-ubuntu-rev-*.img`:
 
 1. Build Mesa for the A418. On the phone, `apt-get install` the build packages
    (`meson`, `ninja-build`, `python3-mako` and Mesa's usual `-dev` packages).

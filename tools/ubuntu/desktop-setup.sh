@@ -65,9 +65,10 @@ id nexus >/dev/null 2>&1 || useradd -m -s /bin/bash nexus
 echo "nexus ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/nexus
 chmod 440 /etc/sudoers.d/nexus
 
-# SSH host keys are made on the first boot (a released disk has none)
+# SSH host keys are made on the first boot (a released disk has none), before
+# the stock unit's sshd -t, which fails without them
 mkdir -p /etc/systemd/system/ssh.service.d
-printf "[Service]\nExecStartPre=/usr/bin/ssh-keygen -A\n" > /etc/systemd/system/ssh.service.d/hostkeys.conf
+printf "[Service]\nExecStartPre=\nExecStartPre=/usr/bin/ssh-keygen -A\nExecStartPre=/usr/sbin/sshd -t\n" > /etc/systemd/system/ssh.service.d/hostkeys.conf
 
 # The VNC password: kept in /etc/nexus5x-vnc-password (root only) and shown on
 # the panel (tty1). A released disk has none; the first boot makes a random one.

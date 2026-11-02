@@ -1,18 +1,20 @@
 #!/bin/bash
 # make-release-disk.sh [IMG]: the shareable disk for nexus5x-desktop.sh, from
 # this PC's working one (out/ubuntu-nbd/ubuntu.img by default):
-# out/release/ubuntu-26.04-xfce-nexus5x.img.zst.
+# out/release/ubuntu-26.04-lomiri-nexus5x.img.zst.
 #
 # Needs the phone in the BusyBox system (boot-rev-*.img), never the Ubuntu it
 # cleans: a copy is attached there as /dev/nbd1 and stripped of everything
 # personal or per-phone (SSH keys, VNC password, Wi-Fi settings, the vendor
-# Wi-Fi calibration, machine id, apt lists, logs, history), then trimmed so
-# the free space compresses to nothing. The first boot makes new ones.
+# Wi-Fi calibration, machine id, apt lists, logs, history, browser data, what
+# the keyboard learned, build trees), then trimmed so the free space compresses
+# to nothing. The first boot makes new ones. The copy starts Lomiri on the panel
+# at boot instead of the VNC desktop; the working disk keeps its own setting.
 set -euo pipefail
 TOP=$(cd "$(dirname "$0")/../.." && pwd)
 SRC=${1:-$TOP/out/ubuntu-nbd/ubuntu.img}
 OUT=$TOP/out/release
-IMG=$OUT/ubuntu-26.04-xfce-nexus5x.img
+IMG=$OUT/ubuntu-26.04-lomiri-nexus5x.img
 PHONE=172.16.42.1
 tel() { (sleep 1; echo "$1"; sleep "${2:-2}") | timeout $((${2:-2} + 3)) nc $PHONE 23 2>/dev/null | tr -d '\r' || true; }
 
@@ -33,6 +35,7 @@ sleep 2
 cat > "$OUT/clean.sh" <<'EOF'
 R=$1
 rm -f $R/root/.ssh/authorized_keys $R/etc/ssh/ssh_host_*
+printf "[Service]\nExecStartPre=\nExecStartPre=/usr/bin/ssh-keygen -A\nExecStartPre=/usr/sbin/sshd -t\n" > $R/etc/systemd/system/ssh.service.d/hostkeys.conf
 rm -f $R/etc/nexus5x-vnc-password $R/home/nexus/.config/tigervnc/passwd
 rm -f $R/home/nexus/.config/tigervnc/*.log $R/home/nexus/.config/tigervnc/*.pid
 rm -rf $R/etc/NetworkManager/system-connections/* $R/var/lib/NetworkManager/*
@@ -43,7 +46,25 @@ rm -f $R/var/lib/dbus/machine-id $R/var/lib/systemd/random-seed
 rm -rf $R/var/lib/apt/lists/* $R/var/cache/apt/*.bin $R/var/cache/apt/archives/*.deb
 rm -rf $R/var/log/journal/* $R/tmp/* $R/var/tmp/*
 find $R/var/log -type f | while read -r f; do : > "$f"; done
-rm -rf $R/root/.bash_history $R/home/nexus/.bash_history $R/home/nexus/.Xauthority $R/home/nexus/.cache
+rm -rf $R/root/.bash_history $R/home/nexus/.bash_history $R/home/nexus/.Xauthority
+# Lomiri's display config (output scale 1) is the one thing in ~/.cache to keep
+N=$R/home/nexus
+mv $N/.cache/lomiri/00.edid $R/tmp/00.edid
+rm -rf $N/.cache
+mkdir -p $N/.cache/lomiri
+mv $R/tmp/00.edid $N/.cache/lomiri/00.edid
+chown -R 1000:1000 $N/.cache
+rm -rf $R/root/* $R/root/.cache $R/root/.config $R/opt/mesa-a418.nonglvnd
+rm -rf $N/.presage $N/.gnupg $N/.ssh $N/.ICEauthority $N/.dbus $N/Pictures/Screenshots
+rm -rf $N/.local/share/morph-browser $N/.local/share/history-service $N/.local/share/lomiri-history-service
+rm -rf $N/.local/share/telepathy $N/.local/share/gallery.ubports
+rm -rf $N/.config/morph-browser $N/.config/connectivity-service $N/.config/pulse $N/.config/libaccounts-glib
+rm -rf $R/var/lib/bluetooth/*
+# Lomiri on the panel at boot, in place of the VNC desktop and tty1's shell
+S=$R/etc/systemd/system
+rm -f $S/multi-user.target.wants/xfce-vnc.service $S/multi-user.target.wants/novnc.service
+rm -f $S/getty.target.wants/getty@tty1.service
+ln -sf /etc/systemd/system/lomiri-phone.service $S/graphical.target.wants/lomiri-phone.service
 # no Wi-Fi password may be left anywhere
 if grep -rlE '(^|[^a-z_])psk=' $R/etc $R/var/lib $R/root $R/home 2>/dev/null; then
 	echo "a Wi-Fi key is still on the disk"; exit 1

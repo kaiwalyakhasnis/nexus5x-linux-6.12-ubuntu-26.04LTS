@@ -7,6 +7,7 @@ clock (seconds since 1970), which the phone takes at boot: it has no RTC.
 
 usage: usb-proxy.py [address] [port]
 """
+import errno
 import select
 import socket
 import socketserver
@@ -88,5 +89,14 @@ class Server(socketserver.ThreadingMixIn, socketserver.TCPServer):
 
 addr = sys.argv[1] if len(sys.argv) > 1 else '172.16.42.2'
 port = int(sys.argv[2]) if len(sys.argv) > 2 else 3128
+# the address only exists once the phone's USB network is up
+while True:
+    try:
+        server = Server((addr, port), Proxy)
+        break
+    except OSError as e:
+        if e.errno != errno.EADDRNOTAVAIL:
+            raise
+        time.sleep(1)
 print(f'proxy on {addr}:{port}', flush=True)
-Server((addr, port), Proxy).serve_forever()
+server.serve_forever()
