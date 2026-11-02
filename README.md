@@ -1,4 +1,4 @@
-# Nexus 5X on Linux 6.12 + BusyBox (WIP)
+# Nexus 5X on Linux 6.12 + Ubuntu 26.04 LTS
 
 > **Disclaimer.** This is an experiment: I'm trying out what Claude can do
 > with an old phone. Most of the patches, device tree and text were written
