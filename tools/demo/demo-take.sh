@@ -3,7 +3,7 @@
 # panel while fake touches open the indicator panel and Settings (coordinates
 # for GridUnit 21). Real time, nothing is sped up.
 OUT=${1:-/dev/shm/demo.rec}
-fbrec "$OUT" 30 &
+taskset -c 5 fbrec "$OUT" 30 &
 sleep 1.5
 nexus-touch swipe 930 5 930 1100 500	# pull the panel down
 sleep 2.5

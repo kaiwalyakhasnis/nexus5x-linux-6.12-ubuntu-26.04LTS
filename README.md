@@ -248,7 +248,7 @@ To record the demo at the top, with Lomiri on its home screen: build
 `tools/fbgrab/fbrec.c` on the phone (`gcc -O2 -I/usr/include/libdrm fbrec.c -o /usr/local/bin/fbrec -ldrm`), install
 `tools/demo/touch.py` as `/usr/local/bin/nexus-touch` and run
 `tools/demo/demo-take.sh`. Then copy `/dev/shm/demo.rec` to the PC and run
-`tools/fbgrab/rec2gif.py demo.rec demo.gif 480 15`.
+`tools/fbgrab/rec2gif.py demo.rec demo.gif 480 30`.
 
 ## Build and boot
 

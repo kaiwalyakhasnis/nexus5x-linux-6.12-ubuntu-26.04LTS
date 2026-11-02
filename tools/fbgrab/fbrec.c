@@ -1,14 +1,16 @@
 // fbrec OUT SECONDS [card]: record what the panel shows. Each new frame the
 // compositor flips to goes to OUT as a u32 millisecond timestamp and half-size
-// (nearest) RGB565 pixels; a still screen writes nothing, and a frame the
+// (nearest) RGB888 pixels; a still screen writes nothing, and a frame the
 // compositor flipped away from during the read is dropped, since that buffer
-// may already be half redrawn. Same limits as fbgrab:
+// may already be half redrawn. Rows are copied whole first: the buffer is
+// uncached, so word-by-word reads would take longer than a frame. Same limits as fbgrab:
 // root, 32-bit XRGB/ARGB8888 linear buffers. Keep OUT in /dev/shm: the root disk
 // is on the PC. tools/fbgrab/rec2gif.py turns the result into a GIF.
 #include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/mman.h>
 #include <time.h>
 #include <unistd.h>
@@ -91,11 +93,17 @@ int main(int argc, char **argv)
 		return 1;
 	}
 	uint32_t start = now_ms(), end = start + atoi(argv[2]) * 1000, last = 0, frames = 0, dropped = 0;
-	uint16_t *pix = NULL;
+	uint32_t flips = 0, seen = 0, read_ms = 0;
+	uint8_t *pix = NULL;
+	uint32_t *copy = NULL;
 	while (now_ms() < end) {
 		uint32_t id = scanout_fb(fd, pr);
+		if (id && id != seen) {
+			seen = id;
+			flips++;
+		}
 		if (!id || id == last) {
-			usleep(5000);
+			usleep(1000);
 			continue;
 		}
 		int n = find_map(fd, id);
@@ -105,15 +113,14 @@ int main(int argc, char **argv)
 		}
 		last = id;
 		uint32_t t = now_ms() - start, w = maps[n].w / 2, h = maps[n].h / 2;
-		if (!pix)
-			pix = malloc(w * h * 2);
-		for (uint32_t y = 0; y < h; y++) {
-			const uint32_t *s = (const uint32_t *)(maps[n].map + (size_t)y * 2 * maps[n].pitch);
-			for (uint32_t x = 0; x < w; x++) {
-				uint32_t p = s[x * 2];
-				pix[y * w + x] = (p >> 8 & 0xf800) | (p >> 5 & 0x07e0) | (p >> 3 & 0x001f);
-			}
+		if (!pix) {
+			pix = malloc(w * h * 3);
+			copy = malloc(maps[n].w * 4 * h);
 		}
+		uint32_t r0 = now_ms();
+		for (uint32_t y = 0; y < h; y++)
+			memcpy(copy + y * maps[n].w, maps[n].map + (size_t)y * 2 * maps[n].pitch, maps[n].w * 4);
+		read_ms += now_ms() - r0;
 		if (scanout_fb(fd, pr) != id) {
 			dropped++;
 			last = 0;
@@ -122,10 +129,17 @@ int main(int argc, char **argv)
 		if (!frames)
 			fprintf(out, "FBREC %u %u\n", w, h);
 		fwrite(&t, 4, 1, out);
-		fwrite(pix, 2, w * h, out);
+		for (uint32_t i = 0; i < w * h; i++) {
+			uint32_t p = copy[(i / w) * maps[n].w + (i % w) * 2];
+			pix[i * 3] = p >> 16;
+			pix[i * 3 + 1] = p >> 8;
+			pix[i * 3 + 2] = p;
+		}
+		fwrite(pix, 3, w * h, out);
 		frames++;
 	}
 	fclose(out);
-	printf("%u frames (%u dropped) in %u ms\n", frames, dropped, now_ms() - start);
+	printf("%u frames, %u dropped, %u flips seen, in %u ms; %u ms per read\n", frames, dropped,
+	       flips, now_ms() - start, frames + dropped ? read_ms / (frames + dropped) : 0);
 	return 0;
 }
