@@ -1,0 +1,33 @@
+# Lomiri on the phone's own panel and touchscreen, as user nexus in a real
+# logind session on tty1 (which gives it the DRM and input devices), on the
+# A418 Mesa in /opt/mesa-a418. Stops the VNC desktop to keep RAM for it.
+[Unit]
+Description=Lomiri on the panel (tty1)
+After=systemd-user-sessions.service network.target
+Conflicts=getty@tty1.service xfce-vnc.service novnc.service
+
+[Service]
+User=nexus
+PAMName=login
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+StandardInput=tty-fail
+StandardOutput=journal
+StandardError=journal
+UtmpIdentifier=tty1
+Environment=XDG_SESSION_TYPE=wayland XDG_SESSION_CLASS=user
+Environment=XDG_SESSION_DESKTOP=lomiri XDG_CURRENT_DESKTOP=Lomiri
+Environment=LD_LIBRARY_PATH=/opt/mesa-a418/lib/aarch64-linux-gnu
+Environment=LIBGL_DRIVERS_PATH=/opt/mesa-a418/lib/aarch64-linux-gnu/dri
+Environment=GBM_BACKENDS_PATH=/opt/mesa-a418/lib/aarch64-linux-gnu/gbm
+# GMEM (tiles in OCMEM) renders garbage so far; straight to RAM is right
+Environment=FD_MESA_DEBUG=sysmem
+# scale and orientation: lomiri-session asks device-info, which reads
+# /etc/deviceinfo/devices/bullhead.yaml (tools/lomiri/bullhead.yaml)
+Environment=DEVICEINFO_DEVICE_NAME=bullhead
+ExecStart=/usr/bin/dm-lomiri-session
+Restart=no
+
+[Install]
+WantedBy=graphical.target

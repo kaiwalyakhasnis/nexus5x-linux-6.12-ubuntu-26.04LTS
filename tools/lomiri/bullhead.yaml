@@ -1,0 +1,13 @@
+# deviceinfo for the Nexus 5X (5.2", 1080x1920, 424 ppi): a phone, portrait,
+# at the phone default grid unit. lomiri-phone.service sets
+# DEVICEINFO_DEVICE_NAME=bullhead; the DT model names match too.
+bullhead:
+  Names:
+    - bullhead
+    - LG Nexus 5X rev 1.0
+    - LG Nexus 5X rev 1.01
+  PrettyName: LG Nexus 5X
+  DeviceType: phone
+  GridUnit: 21
+  WebkitDpr: 2
+  PrimaryOrientation: Portrait

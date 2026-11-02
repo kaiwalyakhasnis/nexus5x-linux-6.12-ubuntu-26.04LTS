@@ -1,0 +1,66 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * The Adreno 418 GPU, from the phone's 3.10 kernel: qcom/msm8992-gpu.dtsi
+ * (kgsl-3d0@fdb00000, SPI 33, chip id 0x04010800, clocks core/iface/rbbmtimer)
+ * and qcom/msm8992.dtsi (gdsc_oxili_gx on pmi8994_s2_corner). Needs kernel
+ * patch "drm/msm/a4xx: add the Adreno 418 (MSM8992)".
+ *
+ * The core clock comes from the RPM (gfx3d_clk_src), which also sets the
+ * VDD_GFX voltage for it; downstream only keeps the rail on at a floor
+ * corner, here SVS SOC through required-opps. GMEM is the 512 KiB OCMEM
+ * region msm8992.dtsi already sets aside (gmu_sram), the "graphics" zone of
+ * the 3.10 qcom,ocmem node (kernel patches 0022, 0023).
+ *
+ * No IOMMU node (the GPU's msm-smmu-v1 has no mainline driver): the GPU then
+ * works from the VRAM carveout at physical addresses, which the kernel only
+ * allows with msm.allow_vram_carveout=1 on the command line. That SMMU is
+ * TrustZone's all the same (3.10 qcom/msm8992-iommu.dtsi kgsl_iommu,
+ * qcom,iommu-secure-id 18): the driver has TrustZone restore it at every
+ * power up, or the GPU's first memory access hangs the phone.
+ *
+ * OPPs: the lowest two stock levels for now (downstream gpu-pwrlevels go up
+ * to 600 MHz: 180, 300, 367, 450, 490, 600).
+ */
+/* MSM8994 layout, and no TrustZone lock for the GPU's zone */
+&ocmem {
+	compatible = "qcom,msm8994-ocmem";
+};
+
+&soc {
+	gpu: gpu@fdb00000 {
+		compatible = "qcom,adreno-418.0", "qcom,adreno";
+		reg = <0xfdb00000 0x40000>;
+		reg-names = "kgsl_3d0_reg_memory";
+		interrupts = <GIC_SPI 33 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "kgsl_3d0_irq";
+
+		clocks = <&mmcc OXILI_GFX3D_CLK>,
+			 <&mmcc OXILICX_AHB_CLK>,
+			 <&mmcc OXILI_RBBMTIMER_CLK>,
+			 <&mmcc OCMEMCX_OCMEMNOC_CLK>;
+		clock-names = "core", "iface", "rbbmtimer", "mem";
+
+		/* the rail first: runtime PM powers them up in this order */
+		power-domains = <&rpmpd MSM8994_VDDGFX>,
+				<&mmcc OXILI_GX_GDSC>;
+		power-domain-names = "gfx", "gx";
+		required-opps = <&rpmpd_opp_svs_soc>;
+
+		sram = <&gmu_sram>;
+		qcom,iommu-secure-id = <18>;
+
+		operating-points-v2 = <&gpu_opp_table>;
+
+		gpu_opp_table: opp-table {
+			compatible = "operating-points-v2";
+
+			opp-180000000 {
+				opp-hz = /bits/ 64 <180000000>;
+			};
+
+			opp-300000000 {
+				opp-hz = /bits/ 64 <300000000>;
+			};
+		};
+	};
+};

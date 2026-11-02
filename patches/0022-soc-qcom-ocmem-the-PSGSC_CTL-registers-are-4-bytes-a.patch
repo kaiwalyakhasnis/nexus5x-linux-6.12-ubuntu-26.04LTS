@@ -1,0 +1,30 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bullhead-linux <kaiwalyakhasnis57@gmail.com>
+Date: Sun, 1 Nov 2026 12:58:29 +0900
+Subject: [PATCH] soc: qcom: ocmem: the PSGSC_CTL registers are 4 bytes apart
+
+One 32-bit power/clock control register per region, at 0x3c + 4 * n, as
+the downstream 3.10 driver has it (ocmem_core.c PSCGC_CTL_n). With a stride
+of 1, allocating OCMEM on a part with more than one region writes 32 bits
+at 0x3d and takes an alignment fault (MSM8992: 3 regions, ocmem_allocate
+from the Adreno 418).
+---
+ drivers/soc/qcom/ocmem.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/soc/qcom/ocmem.c b/drivers/soc/qcom/ocmem.c
+index 37ea6b86a..989bb3058 100644
+--- a/drivers/soc/qcom/ocmem.c
++++ b/drivers/soc/qcom/ocmem.c
+@@ -92,7 +92,7 @@ struct ocmem {
+ #define OCMEM_REG_GEN_STATUS			0x0000000c
+ 
+ #define OCMEM_REG_PSGSC_STATUS			0x00000038
+-#define OCMEM_REG_PSGSC_CTL(i0)			(0x0000003c + 0x1*(i0))
++#define OCMEM_REG_PSGSC_CTL(i0)			(0x0000003c + 0x4*(i0))
+ 
+ #define OCMEM_PSGSC_CTL_MACRO0_MODE(val)	FIELD_PREP(0x00000007, (val))
+ #define OCMEM_PSGSC_CTL_MACRO1_MODE(val)	FIELD_PREP(0x00000070, (val))
+-- 
+2.43.0
+

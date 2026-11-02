@@ -19,6 +19,9 @@ FW=$STAGE/lib/firmware/ath10k/QCA6174/hw3.0
 mkdir -p "$FW"
 cp "$TOP/downloads/linux-firmware/firmware-6.bin" "$TOP/downloads/linux-firmware/notice_ath10k_firmware-6.txt" "$FW/"
 cp "$TOP"/downloads/linux-firmware/regulatory.db* "$STAGE/lib/firmware/"
+# GPU: the A420 microcode the Adreno 418 runs
+mkdir -p "$STAGE/lib/firmware/qcom"
+cp "$TOP"/downloads/linux-firmware/{a420_pm4.fw,a420_pfp.fw,LICENSE.qcom} "$STAGE/lib/firmware/qcom/"
 ln -sf /bin/busybox "$STAGE/sbin/init"
 ln -sf busybox "$STAGE/bin/sh"
 # /dev/console must exist before devtmpfs is mounted, or init has no stdout.

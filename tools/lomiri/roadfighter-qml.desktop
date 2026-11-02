@@ -1,0 +1,10 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Terminal=false
+Exec=env QT_QPA_PLATFORM=wayland /home/nexus/road-fighter-qml/build/roadfighter-qml
+Icon=/home/nexus/.local/share/icons/roadfighter-qml.svg
+Name=Road Fighter
+X-Lomiri-Touch=true
+X-Lomiri-Single-Instance=true
+X-Lomiri-Splash-Color=#000000

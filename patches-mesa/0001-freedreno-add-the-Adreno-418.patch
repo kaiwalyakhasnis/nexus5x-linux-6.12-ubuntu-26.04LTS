@@ -1,0 +1,17 @@
+From: bullhead-linux <kaiwalyakhasnis57@gmail.com>
+Subject: [PATCH] freedreno: add the Adreno 418 (MSM8992)
+
+The Nexus 5X GPU, chip id 4.1.8.0. The kernel (drm/msm, "drm/msm/a4xx: add
+the Adreno 418") runs it like an A430 with 512 KiB of GMEM, which it reports
+itself; userspace needs nothing but its id next to the other A4xx parts.
+---
+--- a/src/freedreno/common/freedreno_devices.py
++++ b/src/freedreno/common/freedreno_devices.py
+@@ -228,6 +228,7 @@
+ 
+ add_gpus([
+         GPUId(405),
++        GPUId(418),
+         GPUId(420),
+         GPUId(430),
+     ], GPUInfo(

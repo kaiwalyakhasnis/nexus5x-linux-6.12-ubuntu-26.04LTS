@@ -7,7 +7,14 @@
 > who knows these drivers. Read it as notes from an experiment, not a reference,
 > and use it at your own risk (`fastboot boot` only, never flash it).
 
-> **Work in progress.** Display, touch, a USB keyboard and mouse, all 6 cores, CPU frequency scaling, Wi-Fi and an Ubuntu 26.04 desktop (shown on a PC over USB) work; much of the phone does not yet (see the table below).
+> **Work in progress.** Display, touch, a USB keyboard and mouse, all 6 cores, CPU frequency scaling, Wi-Fi, the Adreno 418 GPU with Lomiri (Ubuntu Touch's shell) on the panel and an Ubuntu 26.04 desktop (shown on a PC over USB) work; much of the phone does not yet (see the table below).
+
+<img src="screenshots/lomiri-demo.gif" width="360">
+
+*Lomiri on the Adreno 418: the indicator panel and Settings opening, recorded
+from the panel in real time, with scripted touches
+([how](#lomiri-on-the-panel)). The bands during animations are a rendering bug
+that is on the panel too, not the recording.*
 
 <img src="screenshots/vnc-desktop.png" width="800">
 
@@ -21,7 +28,8 @@ host for a keyboard, all 6 CPU cores and CPU frequency scaling up to the
 stock 1.44/1.82 GHz. It boots to a BusyBox shell on the panel, and Ubuntu
 26.04.1 LTS runs on top of it in RAM (`ubuntu-chroot`, see Build and boot),
 or boots as the whole system with an XFCE desktop shown on a PC (see
-[Ubuntu desktop on the PC](#ubuntu-desktop-on-the-pc)).
+[Ubuntu desktop on the PC](#ubuntu-desktop-on-the-pc)), or with Lomiri on
+the panel, drawn by the GPU (see [Lomiri on the panel](#lomiri-on-the-panel)).
 Nothing gets flashed: `fastboot boot` loads it into RAM, and a reboot goes
 back to whatever is installed.
 
@@ -47,6 +55,7 @@ Tested on a rev_1.0 board (LGH791, bootloader BHZ32c).
 | ✅ | USB host: keyboard | `fusb301`, `qpnp-smbcharger` (OTG), `dwc3-msm` | New `fusb301`, new `qcom-pmi8994-otg`, mainline `dwc3` (xHCI) and `usbhid` | [0013](patches/0013-regulator-add-the-PMI8994-OTG-boost.patch), [0014](patches/0014-usb-misc-add-the-FUSB301-Type-C-CC-controller.patch) | A USB keyboard on a USB-C OTG adapter types into the shell on the panel (tty1; Alt+F2 shows the status screen). The FUSB301 switches the port to host and turns on 5 V; the PC's USB network comes back when it is plugged in again |
 | ✅ | Ubuntu 26.04.1 LTS userspace | — | — | — | Ubuntu Base (arm64) unpacked into RAM and entered with `ubuntu-chroot`. `apt` works through a proxy on the PC, and an SSH server gives a full Ubuntu login from the PC. Gone after a reboot |
 | ✅ | Ubuntu desktop on the PC | — | Mainline `nbd` for the root disk | — | Ubuntu with systemd as the whole system, its root disk a file on the PC (NBD over the USB network). XFCE runs in TigerVNC and shows in the PC's browser (noVNC). Software rendering |
+| ⚠️ | Lomiri on the panel (Ubuntu Touch's shell) | — | Ubuntu 26.04's Lomiri 0.5 and Mir 2.25, unchanged, on the GPU above | — | Shell, indicator panel, Settings, Terminal, Morph browser and the on-screen keyboard run on the GPU. Not in the release disk, and started by hand, not at boot. Same bands during animations |
 | ✅ | Wi-Fi (QCA6174 on PCIe) | `qcacld-2.0`, `cnss`, `msm_pcie` | Mainline `ath10k_pci`, mainline `pcie-qcom`, new `phy-qcom-pcie-msm8994` | [0015](patches/0015-clk-qcom-gcc-msm8994-PCIe0-pipe-clock-from-the-PHY.patch)\*, [0016](patches/0016-clk-qcom-gcc-msm8994-PCIe-PHY-pipe-resets.patch)\*, [0017](patches/0017-clk-qcom-gcc-msm8994-give-the-PCIe-aux-RCGs-a-parent.patch)\*, [0018](patches/0018-clk-qcom-gcc-msm8994-do-not-wait-for-the-PCIe-aux-br.patch)\*, [0019](patches/0019-phy-qcom-add-the-MSM8994-MSM8992-PCIe-PHY-20nm-QMP.patch), [0020](patches/0020-PCI-qcom-add-MSM8994-MSM8992.patch) | PCIe Gen 1 x1 link, mainline `ath10k` with linux-firmware's `firmware-6.bin`. Scans 2.4 and 5 GHz, WPA2, DHCP. The calibration comes from the phone's own vendor partition |
 | ✅ | USB host: mouse | `fusb301`, `qpnp-smbcharger` (OTG), `dwc3-msm` | Same as the keyboard; mainline `usbhid` | [0013](patches/0013-regulator-add-the-PMI8994-OTG-boost.patch), [0014](patches/0014-usb-misc-add-the-FUSB301-Type-C-CC-controller.patch) | A USB mouse on the same adapter works like any USB HID device. `touchtest` shows a pointer and paints with the left button |
 | ✅ | eMMC detected, pstore/ramoops, QEMU `virt` | `sdhci-msm`, `ramoops` | Mainline `sdhci-msm`, `ramoops` | — | eMMC is never written. Only the vendor partition is mounted, read-only, for the Wi-Fi calibration |
@@ -57,7 +66,8 @@ Tested on a rev_1.0 board (LGH791, bootloader BHZ32c).
 | ⚠️ | Display on every boot | `rpm-smd` | Mainline `qcom_smd_rpm`, `qcom_smd-regulator`, `rpmpd` | — | About 1 boot in 6 the RPM (SMD) does not answer. Then there are no RPM regulators: the panel stays frozen on the bootloader's Google logo and cpufreq stays off (telnet still works). A `reboot` from such a boot can hang: hold Power, then Power + Volume down |
 | ⚠️ | Boot-time `WARNING` from `wled_ovp_work` | `leds-qpnp-wled` | Mainline `qcom-wled` | — | An unbalanced `enable_irq`, because the bootloader leaves the backlight on. Cosmetic |
 | ❌ | Closed-loop CPR, thermal core control | `cpr-regulator` (closed loop), `msm_thermal` core control | None | — | The CPR hardware loop that trims voltage below open loop (stock runs 1440 MHz at 1115 mV, here 1160 mV). The stock core offlining (LG: from 90 °C) has no mainline equivalent |
-| ❌ | GPU (Adreno 418), IOMMU | `kgsl`, `msm_iommu` (`qcom,msm-smmu-v1`) | None | — | Scanout uses a contiguous carveout instead |
+| ⚠️ | GPU (Adreno 418) | `kgsl`, `ocmem` | Mainline `drm/msm` (a4xx) and `ocmem`; Mesa freedreno with [one patch](patches-mesa/0001-freedreno-add-the-Adreno-418.patch) | [0021](patches/0021-drm-msm-a4xx-add-the-Adreno-418-MSM8992.patch), [0022](patches/0022-soc-qcom-ocmem-the-PSGSC_CTL-registers-are-4-bytes-a.patch), [0023](patches/0023-soc-qcom-ocmem-add-MSM8994-MSM8992.patch), [0024](patches/0024-drm-msm-msm.allow_vram_carveout-also-lets-users-subm.patch), [0025](patches/0025-drm-msm-the-shrinker-and-VRAM-carveout-objects.patch) | OpenGL ES 3.1: kmscube at 60 fps, glmark2 off-screen scores 191. Capped at 300 MHz (stock 600) until it has thermal limits. Tiled (GMEM) rendering draws garbage, so everything runs with `FD_MESA_DEBUG=sysmem`. Bands appear during animations |
+| ❌ | IOMMU | `msm_iommu` (`qcom,msm-smmu-v1`) | None | — | Scanout and the GPU use a contiguous carveout instead. With no IOMMU, any program that can use the GPU can reach all of RAM |
 | ❌ | Bluetooth, modem, audio, camera, sensors, battery/charging, RTC | `bluetooth-power` + UART, `pil-q6v5-mss`, ASoC `msm8994` + `wcd9330`, `msmb_camera`, `nanohub`, `qpnp-fg` + `qpnp-smbcharger`, `qpnp-rtc` | None | — | Not attempted |
 
 \* from [oneplus2-mainline](https://github.com/luvingiane/oneplus2-mainline) (OnePlus 2, MSM8994). "Mainline" means the driver as it is in kernel.org 6.12; "DT only" means it needed only device tree nodes, no code change.
@@ -96,7 +106,8 @@ a shell on CPU0. These are the extra pieces:
    * one of LK's three gamma tables, chosen from LK's command line;
    * the 3.10 init commands.
 5. **No IOMMU**, so the display scans out of a contiguous carveout
-   (`msm.vram=32m cma=96M`).
+   (`msm.vram=256m cma=320M`). It is that big because the GPU works from it
+   too, window buffers included.
 6. **Command line**: `clk_ignore_unused pd_ignore_unused regulator_ignore_unused`
    so nothing the bootloader set up gets switched off,
    `fbcon=font:TER16x32` so the console is readable on a 1080-pixel panel, and
@@ -163,12 +174,36 @@ a shell on CPU0. These are the extra pieces:
     bandgap trims from 3.10, and the DBI base must stay at 0 (upstream's CPU
     address hangs the bus). The chip's calibration (`bdwlan30.bin`) is a
     vendor file, so it is copied at boot from the phone's own vendor partition.
+19. **GPU** (0021-0025, `dts/bullhead-gpu.dtsi`, `patches-mesa/`): mainline
+    knows the A405, A420 and A430, not the A418.
+    * 0021 adds it from the 3.10 `kgsl` values: chip 0x04010800, 512K of GMEM,
+      the A420 microcode (`scripts/fetch-sources.sh`) and A430-style setup. It
+      attaches both power domains and does TrustZone's SMMU setup.
+    * 0022, 0023: OCMEM's `PSGSC_CTL` registers are 4 bytes apart, and the
+      8992 has 4 regions. TrustZone refuses the OCMEM lock for graphics, so,
+      like 3.10, it isn't locked.
+    * 0024: `msm.allow_vram_carveout=1` also lets non-root programs submit,
+      since Lomiri doesn't run as root. See the IOMMU row above for the cost.
+    * 0025: the shrinker treated carveout objects as shmem, and the resulting
+      oops in `kswapd` froze the phone.
+    * The DT only has the 180 and 300 MHz points. The stock ones up to 600 MHz
+      wait for GPU thermal limits.
+    * Mesa is built as a GLVND vendor. An earlier build that replaced
+      `libEGL.so.1` crashed Qt 6 apps on their first GL call.
+20. **Lomiri** needed no patches, only configuration (`tools/lomiri/`):
+    * Scale: qtmir gives a DSI panel an output scale of `GRID_UNIT_PX / 8`,
+      Mir passes it on to Wayland clients, and Lomiri sizes windows in pixels,
+      so apps drew about 3x too big. The output scale stays 1, and a changed
+      `ShellScreen.qml` takes the shell's units from `GRID_UNIT_PX`.
+    * Full-screen opaque apps were invisible: the shell's output has no usable
+      depth buffer, so Qt's opaque pass drew the wallpaper over them.
+      `QSG_NO_DEPTH_BUFFER=1` draws back to front.
 
 Patches 0001-0004, 0009 and 0015-0018 come from
 [oneplus2-mainline](https://github.com/luvingiane/oneplus2-mainline)
 (OnePlus 2, MSM8994, GPL-2.0), and 0019 is adapted from its PHY driver. Each
 value was checked against the Nexus 5X's own 3.10 kernel source. Patches
-0005-0008, 0010-0014 and 0020 are new.
+0005-0008, 0010-0014 and 0020-0025 are new.
 
 ## Ubuntu desktop on the PC
 
@@ -188,6 +223,32 @@ keep the PC side running.
 Wi-Fi: `sudo nmtui` in the desktop's terminal. To build the disk yourself:
 `tools/ubuntu/nbd-root.sh`, `nbd-install.sh`, `desktop-setup.sh`, then
 `make-release-disk.sh` and `make-release.sh` for the release files.
+
+## Lomiri on the panel
+
+Lomiri, Ubuntu Touch's shell, runs on the phone's own screen, drawn by the
+GPU. It isn't in the release disk yet, so it goes on a disk you built yourself
+(see above), with the phone booted from `out/boot-ubuntu-rev-*.img`:
+
+1. Build Mesa for the A418. On the phone, `apt-get install` the build packages
+   (`meson`, `ninja-build`, `python3-mako` and Mesa's usual `-dev` packages).
+   On the PC, put `mesa-26.0.3.tar.xz` in `downloads/mesa/` and run
+   `tools/mesa/build-on-phone.sh`. It takes about 40 minutes and installs to
+   `/opt/mesa-a418`, next to the system's Mesa.
+2. On the phone, install the shell (about 230 MB):
+   `apt-get install --no-install-recommends lomiri lomiri-desktop-session lomiri-greeter qtmir-desktop mir-platform-graphics-gbm-kms23 mir-platform-graphics-atomic-kms23 mir-platform-input-evdev10 lomiri-keyboard lomiri-keyboard-english maliit-inputcontext-qt5 maliit-inputcontext-qt6 lomiri-terminal-app lomiri-system-settings lomiri-indicator-network ayatana-indicator-session ayatana-indicator-datetime ayatana-indicator-power ayatana-indicator-sound morph-browser polkitd`
+3. Put the files from `tools/lomiri/` in place; `tools/lomiri/README.txt` says
+   where each goes. It needs a user `nexus` (uid 1000).
+4. `systemctl start lomiri-phone`.
+
+If `/dev/dri` only has `card0`, that boot hit the RPM problem in the table:
+reboot and try again.
+
+To record the demo at the top, with Lomiri on its home screen: build
+`tools/fbgrab/fbrec.c` on the phone (`gcc -O2 -I/usr/include/libdrm fbrec.c -o /usr/local/bin/fbrec -ldrm`), install
+`tools/demo/touch.py` as `/usr/local/bin/nexus-touch` and run
+`tools/demo/demo-take.sh`. Then copy `/dev/shm/demo.rec` to the PC and run
+`tools/fbgrab/rec2gif.py demo.rec demo.gif 480 15`.
 
 ## Build and boot
 
@@ -225,8 +286,8 @@ telnet 172.16.42.1                 # PC side gets 172.16.42.2 over DHCP
 
 | Path | What it is |
 |---|---|
-| `patches/` | The 20 kernel patches above, applied by `scripts/prepare-kernel.sh` |
-| `dts/` | Board files: mainline `msm8992-lg-bullhead`, `bullhead-smp.dtsi` (ACC for CPU1-5, A57 L2 and clock mux), `bullhead-display.dtsi` (MDSS, DSI, panel, WLED), `bullhead-thermal.dtsi` (QFPROM, TSENS, thermal zones), `bullhead-cpufreq.dtsi` (rails, CPU clocks, throttling), `bullhead-cpr.dtsi` (CPR nodes, OPP tables; generated), `bullhead-touch.dtsi` (I2C2, touchscreen), `bullhead-usb.dtsi` (FUSB301, OTG VBUS, dual-role dwc3), `bullhead-wifi.dtsi` (PCIe0, its PHY, the QCA6174's power) |
+| `patches/` | The 25 kernel patches above, applied by `scripts/prepare-kernel.sh` |
+| `dts/` | Board files: mainline `msm8992-lg-bullhead`, `bullhead-smp.dtsi` (ACC for CPU1-5, A57 L2 and clock mux), `bullhead-display.dtsi` (MDSS, DSI, panel, WLED), `bullhead-thermal.dtsi` (QFPROM, TSENS, thermal zones), `bullhead-cpufreq.dtsi` (rails, CPU clocks, throttling), `bullhead-cpr.dtsi` (CPR nodes, OPP tables; generated), `bullhead-touch.dtsi` (I2C2, touchscreen), `bullhead-usb.dtsi` (FUSB301, OTG VBUS, dual-role dwc3), `bullhead-wifi.dtsi` (PCIe0, its PHY, the QCA6174's power), `bullhead-gpu.dtsi` (A418, OCMEM) |
 | `scripts/kernel.config` | Options built into the kernel, plus the size diet |
 | `rootfs/` | `/init` (mounts, then hands off to BusyBox init, or with `ubuntu=nbd` to Ubuntu via `ubuntu-nbd.sh`), `inittab` (shell on tty1, status screen on tty2), `rcS` (USB gadget, telnetd), `wlan-board.sh`, boot report |
 | `scripts/mkbootimg.py` | A ~60-line Android boot image writer |
@@ -234,6 +295,11 @@ telnet 172.16.42.1                 # PC side gets 172.16.42.2 over DHCP
 | `tools/cpr/` | `cpr_open_loop.py` (the open-loop voltages from a fuse dump, to check against) and `gen-cpr-dtsi.py` |
 | `tools/touchtest/` | `touchtest [seconds]`: paints each finger's path (and a USB mouse's, with a pointer) and logs input; c clears, q quits. Built into the initramfs as `/usr/bin/touchtest` |
 | `tools/ubuntu/` | `ubuntu-on-phone.sh` (Ubuntu Base into RAM, clock, SSH), `usb-proxy.py` (apt's proxy and the clock on the PC), `ssh-phone.sh` (log in, or `screen` to mirror the panel); `ubuntu-chroot` is in the initramfs. Desktop: `nexus5x-desktop.sh` (all in one), `nbd-root.sh` (the disk), `nbd-install.sh`, `desktop-setup.sh`, `desktop-open.sh`, `show-password.sh`, `make-release-disk.sh`, `make-release.sh` |
+| `patches-mesa/` | Mesa's A418 entry, applied by `tools/mesa/build-on-phone.sh` |
+| `tools/mesa/` | `build-on-phone.sh` (Mesa on the phone, to `/opt/mesa-a418`), `env.sh` (run a program on it) |
+| `tools/lomiri/` | Lomiri's service, GPU environment, device and display settings, and what each is for (`README.txt`) |
+| `tools/fbgrab/` | `fbgrab.c` (a screenshot of what the panel shows), `fbrec.c` and `rec2gif.py` (a recording, then a GIF) |
+| `tools/demo/` | `touch.py` (fake touches on the real touchscreen), `demo-take.sh` (the demo at the top) |
 | `patches-busybox/` | BusyBox fixes, applied by `scripts/build-busybox.sh` |
 | `tools/reboot-to/` | `reboot-to bootloader\|recovery`: reboot with a reason, built into the initramfs |
 | `scripts/phone-boot.sh` | From wherever the phone is, to fastboot, then `fastboot boot` an image |

@@ -1,0 +1,50 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bullhead-linux <kaiwalyakhasnis57@gmail.com>
+Date: Sun, 1 Nov 2026 18:27:32 +0900
+Subject: [PATCH] drm/msm: the shrinker and VRAM carveout objects
+
+Without an IOMMU (msm.allow_vram_carveout) GPU objects come from the VRAM
+carveout and have no shmem file. Purging one such object that userspace
+marked MSM_MADV_DONTNEED (Mesa's buffer cache) dereferenced obj->filp in
+shmem_truncate_range: an oops in kswapd under memory pressure, then in every
+task that reclaims, until the phone stops answering. Purge them without the
+shmem part (put_pages gives their carveout space back), and never evict
+them, as their contents live nowhere else.
+---
+ drivers/gpu/drm/msm/msm_gem.c          | 4 ++++
+ drivers/gpu/drm/msm/msm_gem_shrinker.c | 4 ++++
+ 2 files changed, 8 insertions(+)
+
+diff --git a/drivers/gpu/drm/msm/msm_gem.c b/drivers/gpu/drm/msm/msm_gem.c
+index eeb3b65dd..e787b6652 100644
+--- a/drivers/gpu/drm/msm/msm_gem.c
++++ b/drivers/gpu/drm/msm/msm_gem.c
+@@ -870,6 +870,10 @@ void msm_gem_purge(struct drm_gem_object *obj)
+ 
+ 	drm_gem_free_mmap_offset(obj);
+ 
++	/* VRAM carveout objects (no IOMMU) have no shmem file behind them */
++	if (!obj->filp)
++		return;
++
+ 	/* Our goal here is to return as much of the memory as
+ 	 * is possible back to the system as we are called from OOM.
+ 	 * To do this we must instruct the shmfs to drop all of its
+diff --git a/drivers/gpu/drm/msm/msm_gem_shrinker.c b/drivers/gpu/drm/msm/msm_gem_shrinker.c
+index 89c0ea8dd..8acf3f307 100644
+--- a/drivers/gpu/drm/msm/msm_gem_shrinker.c
++++ b/drivers/gpu/drm/msm/msm_gem_shrinker.c
+@@ -62,6 +62,10 @@ evict(struct drm_gem_object *obj)
+ 	if (is_unevictable(to_msm_bo(obj)))
+ 		return false;
+ 
++	/* VRAM carveout objects: their contents live nowhere else */
++	if (!obj->filp)
++		return false;
++
+ 	if (msm_gem_active(obj))
+ 		return false;
+ 
+-- 
+2.43.0
+

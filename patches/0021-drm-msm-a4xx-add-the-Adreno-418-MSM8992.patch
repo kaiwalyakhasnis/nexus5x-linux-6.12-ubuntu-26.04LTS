@@ -1,0 +1,340 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bullhead-linux <kaiwalyakhasnis57@gmail.com>
+Date: Sun, 1 Nov 2026 11:34:38 +0900
+Subject: [PATCH] drm/msm/a4xx: add the Adreno 418 (MSM8992)
+
+The MSM8992 GPU, as the downstream 3.10 kgsl driver (adreno-gpulist.h,
+adreno_a4xx.c) runs it: chip id 4.1.8.0, a420 PM4/PFP microcode, 512 KiB of
+GMEM in OCMEM, and the A430 code paths: A430 VBIF settings, 7 UCHE ways for
+the VFD, SP/TP software collapse control, the no-bootstrap-speed-up chicken
+bit (CP_DEBUG bit 14). The wait for SP/TP power on, an endless loop so far,
+gives up after 10 ms. OCMEM is looked up on the GPU's node ("sram"), not
+the display controller's. The register dump leaves out the VMIDMT, XPU and
+SMMU blocks, which are TrustZone's here (reading them is an external abort).
+
+The GPU sits in the OXILI_GX GDSC, which sits on the VDD_GFX rail (an RPM
+corner, rpmpd MSM8994_VDDGFX). Two power domains are not attached by the
+driver core, so a4xx_gpu_init attaches the list itself, linked to runtime
+PM; the rail's corner comes from the node's required-opps.
+
+The GPU's SMMU belongs to TrustZone (qcom,iommu-secure-id, 18 here) and has
+no mainline driver; the GPU then runs from the VRAM carveout. That SMMU
+still loses its secure configuration at every GPU power down, and the CP's
+first fetch then hangs the whole bus: restore it at every resume
+(restore_sec_cfg), after setting up TrustZone's secure page table pool once,
+as downstream does at boot, without which TrustZone refuses the restore.
+---
+ drivers/gpu/drm/msm/adreno/a4xx_catalog.c |  11 ++
+ drivers/gpu/drm/msm/adreno/a4xx_gpu.c     | 163 ++++++++++++++++++++--
+ drivers/gpu/drm/msm/adreno/a4xx_gpu.h     |   6 +
+ drivers/gpu/drm/msm/adreno/adreno_gpu.h   |   5 +
+ 4 files changed, 173 insertions(+), 12 deletions(-)
+
+diff --git a/drivers/gpu/drm/msm/adreno/a4xx_catalog.c b/drivers/gpu/drm/msm/adreno/a4xx_catalog.c
+index 93519f807..ac46388af 100644
+--- a/drivers/gpu/drm/msm/adreno/a4xx_catalog.c
++++ b/drivers/gpu/drm/msm/adreno/a4xx_catalog.c
+@@ -20,6 +20,17 @@ static const struct adreno_info a4xx_gpus[] = {
+ 		.gmem  = SZ_256K,
+ 		.inactive_period = DRM_MSM_INACTIVE_PERIOD,
+ 		.init  = a4xx_gpu_init,
++	}, {
++		.chip_ids = ADRENO_CHIP_IDS(0x04010800),
++		.family = ADRENO_4XX,
++		.revn  = 418,
++		.fw = {
++			[ADRENO_FW_PM4] = "a420_pm4.fw",
++			[ADRENO_FW_PFP] = "a420_pfp.fw",
++		},
++		.gmem  = SZ_512K,
++		.inactive_period = DRM_MSM_INACTIVE_PERIOD,
++		.init  = a4xx_gpu_init,
+ 	}, {
+ 		.chip_ids = ADRENO_CHIP_IDS(0x04020000),
+ 		.family = ADRENO_4XX,
+diff --git a/drivers/gpu/drm/msm/adreno/a4xx_gpu.c b/drivers/gpu/drm/msm/adreno/a4xx_gpu.c
+index 8b4cdf95f..e9e45079b 100644
+--- a/drivers/gpu/drm/msm/adreno/a4xx_gpu.c
++++ b/drivers/gpu/drm/msm/adreno/a4xx_gpu.c
+@@ -1,6 +1,11 @@
+ // SPDX-License-Identifier: GPL-2.0-only
+ /* Copyright (c) 2014 The Linux Foundation. All rights reserved.
+  */
++#include <linux/dma-mapping.h>
++#include <linux/firmware/qcom/qcom_scm.h>
++#include <linux/iopoll.h>
++#include <linux/pm_domain.h>
++
+ #include "a4xx_gpu.h"
+ 
+ #define A4XX_INT0_MASK \
+@@ -198,7 +203,7 @@ static int a4xx_hw_init(struct msm_gpu *gpu)
+ 		gpu_write(gpu, REG_A4XX_VBIF_IN_WR_LIM_CONF0, 0x18181818);
+ 		gpu_write(gpu, REG_A4XX_VBIF_IN_WR_LIM_CONF1, 0x00000018);
+ 		gpu_write(gpu, REG_A4XX_VBIF_ROUND_ROBIN_QOS_ARB, 0x00000003);
+-	} else if (adreno_is_a430(adreno_gpu)) {
++	} else if (adreno_is_a430(adreno_gpu) || adreno_is_a418(adreno_gpu)) {
+ 		gpu_write(gpu, REG_A4XX_VBIF_GATE_OFF_WRREQ_EN, 0x00000001);
+ 		gpu_write(gpu, REG_A4XX_VBIF_IN_RD_LIM_CONF0, 0x18181818);
+ 		gpu_write(gpu, REG_A4XX_VBIF_IN_RD_LIM_CONF1, 0x00000018);
+@@ -247,7 +252,7 @@ static int a4xx_hw_init(struct msm_gpu *gpu)
+ 	 */
+ 	gpu_write(gpu, REG_A4XX_CP_PERFCTR_CP_SEL_0, CP_ALWAYS_COUNT);
+ 
+-	if (adreno_is_a430(adreno_gpu))
++	if (adreno_is_a430(adreno_gpu) || adreno_is_a418(adreno_gpu))
+ 		gpu_write(gpu, REG_A4XX_UCHE_CACHE_WAYS_VFD, 0x07);
+ 
+ 	/* Disable L2 bypass to avoid UCHE out of bounds errors */
+@@ -255,7 +260,8 @@ static int a4xx_hw_init(struct msm_gpu *gpu)
+ 	gpu_write(gpu, REG_A4XX_UCHE_TRAP_BASE_HI, 0xffff0000);
+ 
+ 	gpu_write(gpu, REG_A4XX_CP_DEBUG, (1 << 25) |
+-			(adreno_is_a420(adreno_gpu) ? (1 << 29) : 0));
++			(adreno_is_a420(adreno_gpu) ? (1 << 29) : 0) |
++			(adreno_is_a418(adreno_gpu) ? (1 << 14) : 0));
+ 
+ 	/* On A430 enable SP regfile sleep for power savings */
+ 	/* TODO downstream does this for !420, so maybe applies for 405 too? */
+@@ -379,6 +385,8 @@ static void a4xx_destroy(struct msm_gpu *gpu)
+ 
+ 	adreno_gpu_ocmem_cleanup(&a4xx_gpu->ocmem);
+ 
++	dev_pm_domain_detach_list(a4xx_gpu->pd_list);
++
+ 	kfree(a4xx_gpu);
+ }
+ 
+@@ -502,6 +510,54 @@ static const unsigned int a4xx_registers[] = {
+ 	~0 /* sentinel */
+ };
+ 
++/* A418: no VMIDMT, XPU or SMMU, which are TrustZone's (external aborts) */
++static const unsigned int a418_registers[] = {
++	/* RBBM */
++	0x0000, 0x0002, 0x0004, 0x0021, 0x0023, 0x0024, 0x0026, 0x0026,
++	0x0028, 0x002B, 0x002E, 0x0034, 0x0037, 0x0044, 0x0047, 0x0066,
++	0x0068, 0x0095, 0x009C, 0x0170, 0x0174, 0x01AF,
++	/* CP */
++	0x0200, 0x0233, 0x0240, 0x0250, 0x04C0, 0x04DD, 0x0500, 0x050B,
++	0x0578, 0x058F,
++	/* VSC */
++	0x0C00, 0x0C03, 0x0C08, 0x0C41, 0x0C50, 0x0C51,
++	/* GRAS */
++	0x0C80, 0x0C81, 0x0C88, 0x0C8F,
++	/* RB */
++	0x0CC0, 0x0CC0, 0x0CC4, 0x0CD2,
++	/* PC */
++	0x0D00, 0x0D0C, 0x0D10, 0x0D17, 0x0D20, 0x0D23,
++	/* VFD */
++	0x0E40, 0x0E4A,
++	/* VPC */
++	0x0E60, 0x0E61, 0x0E63, 0x0E68,
++	/* UCHE */
++	0x0E80, 0x0E84, 0x0E88, 0x0E95,
++	/* GRAS CTX 0 */
++	0x2000, 0x2004, 0x2008, 0x2067, 0x2070, 0x2078, 0x207B, 0x216E,
++	/* PC CTX 0 */
++	0x21C0, 0x21C6, 0x21D0, 0x21D0, 0x21D9, 0x21D9, 0x21E5, 0x21E7,
++	/* VFD CTX 0 */
++	0x2200, 0x2204, 0x2208, 0x22A9,
++	/* GRAS CTX 1 */
++	0x2400, 0x2404, 0x2408, 0x2467, 0x2470, 0x2478, 0x247B, 0x256E,
++	/* PC CTX 1 */
++	0x25C0, 0x25C6, 0x25D0, 0x25D0, 0x25D9, 0x25D9, 0x25E5, 0x25E7,
++	/* VFD CTX 1 */
++	0x2600, 0x2604, 0x2608, 0x26A9,
++	/* VBIF */
++	0x3000, 0x3007, 0x300C, 0x3014, 0x3018, 0x301D, 0x3020, 0x3022,
++	0x3024, 0x3026, 0x3028, 0x302A, 0x302C, 0x302D, 0x3030, 0x3031,
++	0x3034, 0x3036, 0x3038, 0x3038, 0x303C, 0x303D, 0x3040, 0x3040,
++	0x3049, 0x3049, 0x3058, 0x3058, 0x305B, 0x3061, 0x3064, 0x3068,
++	0x306C, 0x306D, 0x3080, 0x3088, 0x308B, 0x308C, 0x3090, 0x3094,
++	0x3098, 0x3098, 0x309C, 0x309C, 0x30C0, 0x30C0, 0x30C8, 0x30C8,
++	0x30D0, 0x30D0, 0x30D8, 0x30D8, 0x30E0, 0x30E0, 0x3100, 0x3100,
++	0x3108, 0x3108, 0x3110, 0x3110, 0x3118, 0x3118, 0x3120, 0x3120,
++	0x3124, 0x3125, 0x3129, 0x3129, 0x3131, 0x3131,
++	~0 /* sentinel */
++};
++
+ static const unsigned int a405_registers[] = {
+ 	/* RBBM */
+ 	0x0000, 0x0002, 0x0004, 0x0021, 0x0023, 0x0024, 0x0026, 0x0026,
+@@ -569,22 +625,80 @@ static void a4xx_dump(struct msm_gpu *gpu)
+ 	adreno_dump(gpu);
+ }
+ 
++/*
++ * MSM8994/MSM8992: the GPU's SMMU (no mainline driver here) belongs to
++ * TrustZone. It loses its secure configuration whenever the GPU powers down,
++ * and without it the GPU's first memory access hangs the bus. TrustZone only
++ * restores it once its secure page table pool exists, which downstream sets
++ * up at boot (msm_iommu_sec_ptbl_init); do that here, once.
++ */
++static int a4xx_smmu_sec_init(struct device *dev)
++{
++	static bool done;
++	dma_addr_t paddr;
++	size_t psize = 0;
++	int ret;
++
++	if (done)
++		return 0;
++
++	if (!qcom_scm_is_available())
++		return -EPROBE_DEFER;
++
++	/* older TrustZones lack this one, downstream skips it there */
++	qcom_scm_iommu_set_cp_pool_size(0, 300 * SZ_1M);
++
++	ret = qcom_scm_iommu_secure_ptbl_size(0, &psize);
++	if (ret) {
++		DRM_DEV_ERROR(dev, "SMMU secure page table size: %d\n", ret);
++		return ret;
++	}
++
++	/* TrustZone's from now on, never freed */
++	if (!dma_alloc_attrs(dev, psize, &paddr, GFP_KERNEL,
++			     DMA_ATTR_NO_KERNEL_MAPPING))
++		return -ENOMEM;
++
++	ret = qcom_scm_iommu_secure_ptbl_init(paddr, psize, 0);
++	if (ret) {
++		DRM_DEV_ERROR(dev, "SMMU secure page table init: %d\n", ret);
++		return ret;
++	}
++
++	done = true;
++	return 0;
++}
++
+ static int a4xx_pm_resume(struct msm_gpu *gpu) {
+ 	struct adreno_gpu *adreno_gpu = to_adreno_gpu(gpu);
++	struct a4xx_gpu *a4xx_gpu = to_a4xx_gpu(adreno_gpu);
+ 	int ret;
+ 
+ 	ret = msm_gpu_pm_resume(gpu);
+ 	if (ret)
+ 		return ret;
+ 
+-	if (adreno_is_a430(adreno_gpu)) {
++	if (a4xx_gpu->smmu_sec_id) {
++		ret = qcom_scm_restore_sec_cfg(a4xx_gpu->smmu_sec_id, 0);
++		if (ret) {
++			DRM_DEV_ERROR(&gpu->pdev->dev,
++				      "SMMU secure config restore: %d\n", ret);
++			return ret;
++		}
++	}
++
++	if (adreno_is_a430(adreno_gpu) || adreno_is_a418(adreno_gpu)) {
+ 		unsigned int reg;
+ 		/* Set the default register values; set SW_COLLAPSE to 0 */
+ 		gpu_write(gpu, REG_A4XX_RBBM_POWER_CNTL_IP, 0x778000);
+-		do {
+-			udelay(5);
+-			reg = gpu_read(gpu, REG_A4XX_RBBM_POWER_STATUS);
+-		} while (!(reg & A4XX_RBBM_POWER_CNTL_IP_SP_TP_PWR_ON));
++		ret = gpu_poll_timeout(gpu, REG_A4XX_RBBM_POWER_STATUS, reg,
++				       reg & A4XX_RBBM_POWER_CNTL_IP_SP_TP_PWR_ON,
++				       5, 10000);
++		if (ret) {
++			DRM_DEV_ERROR(&gpu->pdev->dev,
++				      "SP/TP power on timed out: %08x\n", reg);
++			return ret;
++		}
+ 	}
+ 	return 0;
+ }
+@@ -597,7 +711,7 @@ static int a4xx_pm_suspend(struct msm_gpu *gpu) {
+ 	if (ret)
+ 		return ret;
+ 
+-	if (adreno_is_a430(adreno_gpu)) {
++	if (adreno_is_a430(adreno_gpu) || adreno_is_a418(adreno_gpu)) {
+ 		/* Set the default register values; set SW_COLLAPSE to 1 */
+ 		gpu_write(gpu, REG_A4XX_RBBM_POWER_CNTL_IP, 0x778001);
+ 	}
+@@ -677,6 +791,20 @@ struct msm_gpu *a4xx_gpu_init(struct drm_device *dev)
+ 	adreno_gpu = &a4xx_gpu->base;
+ 	gpu = &adreno_gpu->base;
+ 
++	/*
++	 * With more than one power domain (MSM8992: the VDD_GFX rail, then the
++	 * OXILI_GX GDSC on it) the driver core attaches none. Attach them all,
++	 * linked to the GPU's runtime PM, which then powers them up in DT order.
++	 */
++	if (!pdev->dev.pm_domain &&
++	    of_count_phandle_with_args(pdev->dev.of_node, "power-domains",
++				       "#power-domain-cells") > 1) {
++		ret = dev_pm_domain_attach_list(&pdev->dev, NULL,
++						&a4xx_gpu->pd_list);
++		if (ret < 0)
++			goto fail;
++	}
++
+ 	gpu->perfcntrs = NULL;
+ 	gpu->num_perfcntrs = 0;
+ 
+@@ -684,11 +812,22 @@ struct msm_gpu *a4xx_gpu_init(struct drm_device *dev)
+ 	if (ret)
+ 		goto fail;
+ 
+-	adreno_gpu->registers = adreno_is_a405(adreno_gpu) ? a405_registers :
+-							     a4xx_registers;
++	if (!of_property_read_u32(pdev->dev.of_node, "qcom,iommu-secure-id",
++				  &a4xx_gpu->smmu_sec_id)) {
++		ret = a4xx_smmu_sec_init(&pdev->dev);
++		if (ret)
++			goto fail;
++	}
++
++	if (adreno_is_a405(adreno_gpu))
++		adreno_gpu->registers = a405_registers;
++	else if (adreno_is_a418(adreno_gpu))
++		adreno_gpu->registers = a418_registers;
++	else
++		adreno_gpu->registers = a4xx_registers;
+ 
+ 	/* if needed, allocate gmem: */
+-	ret = adreno_gpu_ocmem_init(dev->dev, adreno_gpu,
++	ret = adreno_gpu_ocmem_init(&pdev->dev, adreno_gpu,
+ 				    &a4xx_gpu->ocmem);
+ 	if (ret)
+ 		goto fail;
+diff --git a/drivers/gpu/drm/msm/adreno/a4xx_gpu.h b/drivers/gpu/drm/msm/adreno/a4xx_gpu.h
+index a01448cba..6d9a991a0 100644
+--- a/drivers/gpu/drm/msm/adreno/a4xx_gpu.h
++++ b/drivers/gpu/drm/msm/adreno/a4xx_gpu.h
+@@ -17,6 +17,12 @@ struct a4xx_gpu {
+ 
+ 	/* if OCMEM is used for GMEM: */
+ 	struct adreno_ocmem ocmem;
++
++	/* more than one power domain (MSM8992: VDD_GFX, then OXILI_GX): */
++	struct dev_pm_domain_list *pd_list;
++
++	/* TrustZone's id for the GPU's SMMU (qcom,iommu-secure-id), or 0 */
++	u32 smmu_sec_id;
+ };
+ #define to_a4xx_gpu(x) container_of(x, struct a4xx_gpu, base)
+ 
+diff --git a/drivers/gpu/drm/msm/adreno/adreno_gpu.h b/drivers/gpu/drm/msm/adreno/adreno_gpu.h
+index 58d7e7915..0bc75fd55 100644
+--- a/drivers/gpu/drm/msm/adreno/adreno_gpu.h
++++ b/drivers/gpu/drm/msm/adreno/adreno_gpu.h
+@@ -350,6 +350,11 @@ static inline int adreno_is_a405(const struct adreno_gpu *gpu)
+ 	return adreno_is_revn(gpu, 405);
+ }
+ 
++static inline int adreno_is_a418(const struct adreno_gpu *gpu)
++{
++	return adreno_is_revn(gpu, 418);
++}
++
+ static inline int adreno_is_a420(const struct adreno_gpu *gpu)
+ {
+ 	return adreno_is_revn(gpu, 420);
+-- 
+2.43.0
+

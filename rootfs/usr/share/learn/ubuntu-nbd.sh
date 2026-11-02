@@ -47,6 +47,8 @@ fi
 K=$(uname -r)
 [ -d $NEWROOT/usr/lib/modules/$K ] || cp -a /lib/modules/$K $NEWROOT/usr/lib/modules/
 /usr/share/learn/wlan-board.sh $NEWROOT/usr/lib/firmware
+# the GPU microcode (the disk may not have linux-firmware)
+[ -f $NEWROOT/usr/lib/firmware/qcom/a420_pm4.fw ] || { mkdir -p $NEWROOT/usr/lib/firmware/qcom; cp /lib/firmware/qcom/* $NEWROOT/usr/lib/firmware/qcom/; }
 # reboot-to bootloader|recovery (scripts/phone-boot.sh uses it over telnet)
 cp /sbin/reboot-to $NEWROOT/usr/sbin/reboot-to
 umount /tmp 2>/dev/null

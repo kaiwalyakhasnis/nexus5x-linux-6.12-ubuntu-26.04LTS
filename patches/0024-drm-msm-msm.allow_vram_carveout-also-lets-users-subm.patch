@@ -1,0 +1,43 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bullhead-linux <kaiwalyakhasnis57@gmail.com>
+Date: Sun, 1 Nov 2026 16:17:17 +0900
+Subject: [PATCH] drm/msm: msm.allow_vram_carveout also lets users submit
+
+Without an IOMMU, GPU submits are taken from CAP_SYS_RAWIO only, as the GPU
+reaches all of memory. With msm.allow_vram_carveout=1 the GPU is already run
+that way on purpose (MSM8992: the A418's SMMU belongs to TrustZone, no
+driver), and a desktop session (Lomiri, its apps) runs as a normal user:
+there, take their submits too.
+---
+ drivers/gpu/drm/msm/msm_gem_submit.c | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/msm/msm_gem_submit.c b/drivers/gpu/drm/msm/msm_gem_submit.c
+index c0b4a346e..d0204a961 100644
+--- a/drivers/gpu/drm/msm/msm_gem_submit.c
++++ b/drivers/gpu/drm/msm/msm_gem_submit.c
+@@ -14,6 +14,7 @@
+ 
+ #include "msm_drv.h"
+ #include "msm_gpu.h"
++#include "adreno/adreno_gpu.h"
+ #include "msm_gem.h"
+ #include "msm_gpu_trace.h"
+ 
+@@ -679,7 +680,12 @@ int msm_ioctl_gem_submit(struct drm_device *dev, void *data,
+ 	if (args->pad)
+ 		return -EINVAL;
+ 
+-	if (unlikely(!ctx->aspace) && !capable(CAP_SYS_RAWIO)) {
++	/*
++	 * Without an IOMMU the GPU reaches all of memory: only CAP_SYS_RAWIO may
++	 * submit, unless msm.allow_vram_carveout=1 already opted out of that.
++	 */
++	if (unlikely(!ctx->aspace) && !allow_vram_carveout &&
++	    !capable(CAP_SYS_RAWIO)) {
+ 		DRM_ERROR_RATELIMITED("IOMMU support or CAP_SYS_RAWIO required!\n");
+ 		return -EPERM;
+ 	}
+-- 
+2.43.0
+

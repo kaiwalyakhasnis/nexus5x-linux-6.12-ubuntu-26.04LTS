@@ -1,0 +1,75 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bullhead-linux <kaiwalyakhasnis57@gmail.com>
+Date: Sun, 1 Nov 2026 13:12:37 +0900
+Subject: [PATCH] soc: qcom: ocmem: add MSM8994/MSM8992
+
+The downstream 3.10 driver's layout: 4 regions of 2 macros (1 MiB on
+MSM8992). Its TrustZone (Nexus 5X BHZ32c) answers OCMEM lock and unlock for
+graphics with an error; downstream never makes those calls for the GPU (only
+for mapped transfers) and leaves the graphics MPU to TrustZone, the GPU zone
+(0..512 KiB) being open to the GPU already. So graphics allocations here
+only power the macros up.
+---
+ drivers/soc/qcom/ocmem.c | 22 ++++++++++++++++++++--
+ 1 file changed, 20 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/soc/qcom/ocmem.c b/drivers/soc/qcom/ocmem.c
+index 989bb3058..fe5b3f5fe 100644
+--- a/drivers/soc/qcom/ocmem.c
++++ b/drivers/soc/qcom/ocmem.c
+@@ -49,6 +49,8 @@ struct ocmem_region {
+ struct ocmem_config {
+ 	uint8_t num_regions;
+ 	unsigned long macro_size;
++	/* TrustZone lets the GPU into its zone unlocked, MPU left to it */
++	bool gfx_no_lock;
+ };
+ 
+ struct ocmem {
+@@ -237,7 +239,9 @@ struct ocmem_buf *ocmem_allocate(struct ocmem *ocmem, enum ocmem_client client,
+ 
+ 	update_range(ocmem, buf, CORE_ON, WIDE_MODE);
+ 
+-	if (qcom_scm_ocmem_lock_available()) {
++	if (ocmem->config->gfx_no_lock) {
++		/* nothing to program */
++	} else if (qcom_scm_ocmem_lock_available()) {
+ 		ret = qcom_scm_ocmem_lock(QCOM_SCM_OCMEM_GRAPHICS_ID,
+ 					  buf->offset, buf->len, WIDE_MODE);
+ 		if (ret) {
+@@ -272,7 +276,9 @@ void ocmem_free(struct ocmem *ocmem, enum ocmem_client client,
+ 
+ 	update_range(ocmem, buf, CLK_OFF, MODE_DEFAULT);
+ 
+-	if (qcom_scm_ocmem_lock_available()) {
++	if (ocmem->config->gfx_no_lock) {
++		/* nothing to program */
++	} else if (qcom_scm_ocmem_lock_available()) {
+ 		int ret;
+ 
+ 		ret = qcom_scm_ocmem_unlock(QCOM_SCM_OCMEM_GRAPHICS_ID,
+@@ -428,9 +434,21 @@ static const struct ocmem_config ocmem_8974_config = {
+ 	.macro_size = SZ_128K,
+ };
+ 
++/*
++ * MSM8994/MSM8992, from the downstream 3.10 driver: 4 regions of 2 macros. Its
++ * TrustZone refuses OCMEM lock/unlock for graphics (as downstream never asks:
++ * the GPU's zone is open to it without one), and the MPU is TrustZone's.
++ */
++static const struct ocmem_config ocmem_8994_config = {
++	.num_regions = 4,
++	.macro_size = SZ_128K,
++	.gfx_no_lock = true,
++};
++
+ static const struct of_device_id ocmem_of_match[] = {
+ 	{ .compatible = "qcom,msm8226-ocmem", .data = &ocmem_8226_config },
+ 	{ .compatible = "qcom,msm8974-ocmem", .data = &ocmem_8974_config },
++	{ .compatible = "qcom,msm8994-ocmem", .data = &ocmem_8994_config },
+ 	{ }
+ };
+ 
+-- 
+2.43.0
+
