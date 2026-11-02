@@ -2,12 +2,15 @@
 // compositor flips to goes to OUT as a u32 millisecond timestamp and third-size
 // RGB888 pixels (every third row, columns averaged); a still screen writes nothing, and a frame the
 // compositor flipped away from during the read is dropped, since that buffer
-// may already be half redrawn. Rows are copied whole first: the buffer is
+// may already be half redrawn. KMS names a buffer as soon as it is committed,
+// before the GPU has finished drawing it, so each read first waits for the
+// GPU's fence on the buffer. Rows are copied whole first: the buffer is
 // uncached, so word-by-word reads would take longer than a frame. A second thread
 // converts and writes, so the first is back in time for the next flip. Same limits as fbgrab:
 // root, 32-bit XRGB/ARGB8888 linear buffers. Keep OUT in /dev/shm: the root disk
 // is on the PC. tools/fbgrab/rec2gif.py turns the result into a GIF.
 #include <fcntl.h>
+#include <poll.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -24,7 +27,7 @@
 #define NSLOTS 16
 #define STEP 3
 
-static struct { uint32_t id, w, h, pitch; size_t size; uint8_t *map; } maps[NMAPS];
+static struct { uint32_t id, w, h, pitch; size_t size; uint8_t *map; int fd; } maps[NMAPS];
 static unsigned next_map;
 
 static struct { uint32_t t; uint32_t *copy; } slots[NSLOTS];
@@ -113,15 +116,17 @@ static int find_map(int fd, uint32_t id)
 		drmModeFreeFB2(fb);
 		return -1;
 	}
-	if (maps[n].map)
+	if (maps[n].map) {
 		munmap(maps[n].map, maps[n].size);
+		close(maps[n].fd);
+	}
 	maps[n].id = id;
 	maps[n].w = fb->width;
 	maps[n].h = fb->height;
 	maps[n].pitch = fb->pitches[0];
 	maps[n].size = (size_t)fb->pitches[0] * fb->height + fb->offsets[0];
 	maps[n].map = mmap(NULL, maps[n].size, PROT_READ, MAP_SHARED, dmafd, 0);
-	close(dmafd);
+	maps[n].fd = dmafd;
 	drmCloseBufferHandle(fd, fb->handles[0]);
 	drmModeFreeFB2(fb);
 	if (maps[n].map == MAP_FAILED) {
@@ -148,7 +153,7 @@ int main(int argc, char **argv)
 		return 1;
 	}
 	uint32_t start = now_ms(), end = start + atoi(argv[2]) * 1000, last = 0, dropped = 0, full = 0;
-	uint32_t flips = 0, seen = 0, read_ms = 0, reads = 0;
+	uint32_t flips = 0, seen = 0, read_ms = 0, reads = 0, waited = 0, wait_ms = 0;
 	pthread_t thread;
 	pthread_create(&thread, NULL, writer, NULL);
 	while (now_ms() < end) {
@@ -180,6 +185,13 @@ int main(int argc, char **argv)
 		unsigned k = slot_in % NSLOTS;
 		if (!slots[k].copy)
 			slots[k].copy = malloc(maps[n].w * 4 * rec_h);
+		uint32_t w0 = now_ms();
+		struct pollfd pfd = { .fd = maps[n].fd, .events = POLLIN };
+		poll(&pfd, 1, 100);	/* the GPU's write fence on this buffer */
+		if (now_ms() - w0 > 1) {
+			waited++;
+			wait_ms += now_ms() - w0;
+		}
 		slots[k].t = now_ms() - start;
 		uint32_t r0 = now_ms();
 		for (uint32_t y = 0; y < rec_h; y++)
@@ -202,7 +214,8 @@ int main(int argc, char **argv)
 	pthread_mutex_unlock(&lock);
 	pthread_join(thread, NULL);
 	fclose(out);
-	printf("%u frames, %u dropped mid-read, %u with the queue full, %u flips seen, in %u ms; %u ms per read\n",
-	       written, dropped, full, flips, now_ms() - start, reads ? read_ms / reads : 0);
+	printf("%u frames, %u dropped mid-read, %u with the queue full, %u flips seen, in %u ms; %u ms per read; waited for the GPU %u times, %u ms each\n",
+	       written, dropped, full, flips, now_ms() - start, reads ? read_ms / reads : 0,
+	       waited, waited ? wait_ms / waited : 0);
 	return 0;
 }

@@ -1,8 +1,10 @@
 // fbgrab OUT.ppm [card]: save what the panel shows (the framebuffer on the
 // first active plane) as a binary PPM. Root: GETFB2 hands out buffer handles
 // only to CAP_SYS_ADMIN. 32-bit XRGB/ARGB8888 linear buffers (Mir in sysmem
-// rendering, the console) only.
+// rendering, the console) only. KMS names a buffer as soon as it is committed,
+// before the GPU has finished drawing it, so this waits for the GPU's fence first.
 #include <fcntl.h>
+#include <poll.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -43,6 +45,8 @@ int main(int argc, char **argv)
 		perror("prime export");
 		return 1;
 	}
+	struct pollfd pfd = { .fd = dmafd, .events = POLLIN };
+	poll(&pfd, 1, 500);
 	size_t size = (size_t)fb->pitches[0] * fb->height + fb->offsets[0];
 	uint8_t *map = mmap(NULL, size, PROT_READ, MAP_SHARED, dmafd, 0);
 	if (map == MAP_FAILED) {
