@@ -1,12 +1,14 @@
 // fbrec OUT SECONDS [card]: record what the panel shows. Each new frame the
-// compositor flips to goes to OUT as a u32 millisecond timestamp and half-size
-// (nearest) RGB888 pixels; a still screen writes nothing, and a frame the
+// compositor flips to goes to OUT as a u32 millisecond timestamp and third-size
+// RGB888 pixels (every third row, columns averaged); a still screen writes nothing, and a frame the
 // compositor flipped away from during the read is dropped, since that buffer
 // may already be half redrawn. Rows are copied whole first: the buffer is
-// uncached, so word-by-word reads would take longer than a frame. Same limits as fbgrab:
+// uncached, so word-by-word reads would take longer than a frame. A second thread
+// converts and writes, so the first is back in time for the next flip. Same limits as fbgrab:
 // root, 32-bit XRGB/ARGB8888 linear buffers. Keep OUT in /dev/shm: the root disk
 // is on the PC. tools/fbgrab/rec2gif.py turns the result into a GIF.
 #include <fcntl.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,9 +21,62 @@
 #include <xf86drmMode.h>
 
 #define NMAPS 32
+#define NSLOTS 16
+#define STEP 3
 
 static struct { uint32_t id, w, h, pitch; size_t size; uint8_t *map; } maps[NMAPS];
 static unsigned next_map;
+
+static struct { uint32_t t; uint32_t *copy; } slots[NSLOTS];
+static unsigned slot_in, slot_out;
+static int done;
+static uint32_t rec_w, rec_h, rec_stride, written;
+static FILE *out;
+static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t wake = PTHREAD_COND_INITIALIZER;
+
+static void *writer(void *arg)
+{
+	uint8_t *pix = NULL;
+	for (;;) {
+		pthread_mutex_lock(&lock);
+		while (slot_out == slot_in && !done)
+			pthread_cond_wait(&wake, &lock);
+		if (slot_out == slot_in) {
+			pthread_mutex_unlock(&lock);
+			break;
+		}
+		unsigned n = slot_out % NSLOTS;
+		pthread_mutex_unlock(&lock);
+		uint32_t w = rec_w, h = rec_h;
+		if (!pix)
+			pix = malloc(w * h * 3);
+		for (uint32_t y = 0, i = 0; y < h; y++) {
+			const uint32_t *row = slots[n].copy + y * rec_stride;
+			for (uint32_t x = 0; x < w; x++, i++) {
+				uint32_t r = 0, g = 0, b = 0;
+				for (uint32_t k = 0; k < STEP; k++) {
+					uint32_t p = row[x * STEP + k];
+					r += p >> 16 & 0xff;
+					g += p >> 8 & 0xff;
+					b += p & 0xff;
+				}
+				pix[i * 3] = r / STEP;
+				pix[i * 3 + 1] = g / STEP;
+				pix[i * 3 + 2] = b / STEP;
+			}
+		}
+		if (!written)
+			fprintf(out, "FBREC %u %u\n", w, h);
+		fwrite(&slots[n].t, 4, 1, out);
+		fwrite(pix, 3, w * h, out);
+		written++;
+		pthread_mutex_lock(&lock);
+		slot_out++;
+		pthread_mutex_unlock(&lock);
+	}
+	return arg;
+}
 
 static uint32_t now_ms(void)
 {
@@ -87,15 +142,15 @@ int main(int argc, char **argv)
 	}
 	drmSetClientCap(fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1);
 	drmModePlaneResPtr pr = drmModeGetPlaneResources(fd);
-	FILE *out = fopen(argv[1], "wb");
+	out = fopen(argv[1], "wb");
 	if (!pr || !out) {
 		perror("start");
 		return 1;
 	}
-	uint32_t start = now_ms(), end = start + atoi(argv[2]) * 1000, last = 0, frames = 0, dropped = 0;
-	uint32_t flips = 0, seen = 0, read_ms = 0;
-	uint8_t *pix = NULL;
-	uint32_t *copy = NULL;
+	uint32_t start = now_ms(), end = start + atoi(argv[2]) * 1000, last = 0, dropped = 0, full = 0;
+	uint32_t flips = 0, seen = 0, read_ms = 0, reads = 0;
+	pthread_t thread;
+	pthread_create(&thread, NULL, writer, NULL);
 	while (now_ms() < end) {
 		uint32_t id = scanout_fb(fd, pr);
 		if (id && id != seen) {
@@ -112,34 +167,42 @@ int main(int argc, char **argv)
 			return 1;
 		}
 		last = id;
-		uint32_t t = now_ms() - start, w = maps[n].w / 2, h = maps[n].h / 2;
-		if (!pix) {
-			pix = malloc(w * h * 3);
-			copy = malloc(maps[n].w * 4 * h);
+		pthread_mutex_lock(&lock);
+		int room = slot_in - slot_out < NSLOTS;
+		pthread_mutex_unlock(&lock);
+		if (!room) {
+			full++;
+			continue;
 		}
+		rec_w = maps[n].w / STEP;
+		rec_h = maps[n].h / STEP;
+		rec_stride = maps[n].w;
+		unsigned k = slot_in % NSLOTS;
+		if (!slots[k].copy)
+			slots[k].copy = malloc(maps[n].w * 4 * rec_h);
+		slots[k].t = now_ms() - start;
 		uint32_t r0 = now_ms();
-		for (uint32_t y = 0; y < h; y++)
-			memcpy(copy + y * maps[n].w, maps[n].map + (size_t)y * 2 * maps[n].pitch, maps[n].w * 4);
+		for (uint32_t y = 0; y < rec_h; y++)
+			memcpy(slots[k].copy + y * rec_stride, maps[n].map + (size_t)y * STEP * maps[n].pitch, maps[n].w * 4);
 		read_ms += now_ms() - r0;
+		reads++;
 		if (scanout_fb(fd, pr) != id) {
 			dropped++;
 			last = 0;
 			continue;
 		}
-		if (!frames)
-			fprintf(out, "FBREC %u %u\n", w, h);
-		fwrite(&t, 4, 1, out);
-		for (uint32_t i = 0; i < w * h; i++) {
-			uint32_t p = copy[(i / w) * maps[n].w + (i % w) * 2];
-			pix[i * 3] = p >> 16;
-			pix[i * 3 + 1] = p >> 8;
-			pix[i * 3 + 2] = p;
-		}
-		fwrite(pix, 3, w * h, out);
-		frames++;
+		pthread_mutex_lock(&lock);
+		slot_in++;
+		pthread_cond_signal(&wake);
+		pthread_mutex_unlock(&lock);
 	}
+	pthread_mutex_lock(&lock);
+	done = 1;
+	pthread_cond_signal(&wake);
+	pthread_mutex_unlock(&lock);
+	pthread_join(thread, NULL);
 	fclose(out);
-	printf("%u frames, %u dropped, %u flips seen, in %u ms; %u ms per read\n", frames, dropped,
-	       flips, now_ms() - start, frames + dropped ? read_ms / (frames + dropped) : 0);
+	printf("%u frames, %u dropped mid-read, %u with the queue full, %u flips seen, in %u ms; %u ms per read\n",
+	       written, dropped, full, flips, now_ms() - start, reads ? read_ms / reads : 0);
 	return 0;
 }

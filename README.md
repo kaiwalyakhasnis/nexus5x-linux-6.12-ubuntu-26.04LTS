@@ -11,10 +11,10 @@
 
 <img src="screenshots/lomiri-demo.gif" width="360">
 
-*Lomiri on the Adreno 418: the indicator panel and Settings opening, recorded
-from the panel in real time, with scripted touches
-([how](#lomiri-on-the-panel)). The bands during animations are a rendering bug
-that is on the panel too, not the recording.*
+*Lomiri on the Adreno 418: a tap on the Ubuntu icon opens the app tray, recorded
+from the panel in real time, with a scripted touch
+([how](#lomiri-on-the-panel)). The animation runs at about 30 fps. The bands
+during it are a rendering bug that is on the panel too, not the recording.*
 
 <img src="screenshots/vnc-desktop.png" width="800">
 
@@ -245,10 +245,10 @@ If `/dev/dri` only has `card0`, that boot hit the RPM problem in the table:
 reboot and try again.
 
 To record the demo at the top, with Lomiri on its home screen: build
-`tools/fbgrab/fbrec.c` on the phone (`gcc -O2 -I/usr/include/libdrm fbrec.c -o /usr/local/bin/fbrec -ldrm`), install
+`tools/fbgrab/fbrec.c` on the phone (`gcc -O2 -pthread -I/usr/include/libdrm fbrec.c -o /usr/local/bin/fbrec -ldrm`), install
 `tools/demo/touch.py` as `/usr/local/bin/nexus-touch` and run
 `tools/demo/demo-take.sh`. Then copy `/dev/shm/demo.rec` to the PC and run
-`tools/fbgrab/rec2gif.py demo.rec demo.gif 480 30`.
+`tools/fbgrab/rec2gif.py demo.rec demo.gif 360 30`.
 
 ## Build and boot
 
